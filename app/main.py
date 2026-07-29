@@ -109,7 +109,7 @@ for path in possible_zone_paths:
         except Exception: pass
 if not model_zone_artifact:
     print(
-        "[WARN] [MODULE 2] Fichier 'injury_zone_model.joblib' introuvable. "
+        "[WARN] [MODULE 2] Fichier 'injury_zone_model.joblib' introuvable."
         f"Chemins testes: {possible_zone_paths}"
     )
 
