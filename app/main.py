@@ -95,6 +95,7 @@ except Exception as e:
 model_zone_artifact = None
 possible_zone_paths = [
     os.path.join(BASE_DIR, "ml_core", "models", "injury_zone_model.joblib"),
+    os.path.join(BASE_DIR, "ml_core", "artifacts", "injury_zone_model.joblib"),
     os.path.join(BASE_DIR, "models", "injury_zone_model.joblib"),
     os.path.join(BASE_DIR, "injury_zone_model.joblib")
 ]
@@ -107,12 +108,16 @@ for path in possible_zone_paths:
             break
         except Exception: pass
 if not model_zone_artifact:
-    print("[WARN] [MODULE 2] Fichier 'injury_zone_model.joblib' introuvable.")
+    print(
+        "[WARN] [MODULE 2] Fichier 'injury_zone_model.joblib' introuvable. "
+        f"Chemins testes: {possible_zone_paths}"
+    )
 
 # --- MODULE 3 : Analyse de Survie (Cox Proportional Hazards) ---
 model_survival_artifact = None
 possible_survival_paths = [
     os.path.join(BASE_DIR, "ml_core", "models", "relapse_survival_model.joblib"),
+    os.path.join(BASE_DIR, "ml_core", "artifacts", "relapse_survival_model.joblib"),
     os.path.join(BASE_DIR, "models", "relapse_survival_model.joblib"),
     os.path.join(BASE_DIR, "relapse_survival_model.joblib")
 ]
@@ -126,7 +131,10 @@ for path in possible_survival_paths:
         except Exception as e: 
             print(f"[WARN] [MODULE 3] Erreur de lecture : {e}")
 if not model_survival_artifact:
-    print("[WARN] [MODULE 3] Fichier 'relapse_survival_model.joblib' introuvable.")
+    print(
+        "[WARN] [MODULE 3] Fichier 'relapse_survival_model.joblib' introuvable. "
+        f"Chemins testes: {possible_survival_paths}"
+    )
 
 
 # ---------------------------------------------------------
