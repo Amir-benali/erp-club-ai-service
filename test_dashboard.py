@@ -146,16 +146,22 @@ page = st.sidebar.radio(
     [
         "🩺 M1 - Risque de Blessure (Global)", 
         "🗺️ M2 - Cartographie (Zones)", 
-        "⏳ M3 - Analyse de Survie (Rechute)"
+        "⏳ M3 - Analyse de Survie (Rechute)",
+        "⚽ M4 - Analyse Post-Match (LLM)"
     ]
 )
 st.sidebar.markdown("---")
-st.sidebar.caption("ERP Club AI v4.0 - Déploiement Local")
+st.sidebar.caption("ERP Club AI v5.1.0 - Déploiement Local")
 
 # Endpoints de l'API FastAPI
 API_URL_GLOBAL = "http://localhost:8000/predict-injury"
 API_URL_ZONE = "http://localhost:8000/predict-injury-zone"
 API_URL_RELAPSE = "http://localhost:8000/predict-relapse"
+API_URL_LLM_MATCH = "http://localhost:8000/generate-match-analysis"
+API_URL_LLM_PLAYER = "http://localhost:8000/generate-player-insight"
+API_URL_LLM_TACTICAL = "http://localhost:8000/generate-tactical-suggestion"
+
+
 
 # ==========================================
 # PAGE 1 : RISQUE GLOBAL (Modèle 1)
@@ -248,7 +254,7 @@ elif page == "🗺️ M2 - Cartographie (Zones)":
     <div class="header-container">
         <div class="logo-box">🗺️</div>
         <div>
-            <h1>Cartographie Anatomique</h1>
+            <h1>Cartographie Anatomique des Risques</h1>
             <p>Modèle Multi-classe Random Forest : Prédiction des zones de vulnérabilité corporelle</p>
         </div>
     </div>
@@ -412,11 +418,10 @@ elif page == "⏳ M3 - Analyse de Survie (Rechute)":
                         if curve_data:
                             df_curve = pd.DataFrame(curve_data)
                             
-                            # Création du graphique interactif avec Plotly
                             fig = px.line(
                                 df_curve, x="day", y="probability",
                                 labels={"day": "Jours de suivi après retour", "probability": "Probabilité de ne pas rechuter"},
-                                color_discrete_sequence=['#10b981'] # Vert émeraude
+                                color_discrete_sequence=['#10b981']
                             )
                             
                             fig.update_layout(
@@ -425,7 +430,6 @@ elif page == "⏳ M3 - Analyse de Survie (Rechute)":
                                 plot_bgcolor='rgba(0,0,0,0)'
                             )
                             
-                            # Ajout de la ligne de danger à 50%
                             fig.add_hline(
                                 y=0.5, line_dash="dot", 
                                 annotation_text="Seuil de Danger Critique (50%)", 
@@ -438,12 +442,9 @@ elif page == "⏳ M3 - Analyse de Survie (Rechute)":
                             
                             st.plotly_chart(fig, use_container_width=True)
                             
-                            # Précision globale (C-Index)
                             c_index = data_surv.get("c_index", 0.96)
                             st.success(f"**Concordance Index (Précision globale du modèle) : {c_index:.3f}**")
                             
-                            # Alerte Médicale 
-                            # Récupération de la probabilité au jour 30 (ou la dernière connue si < 30)
                             jours_30 = df_curve[df_curve['day'] >= 30]
                             prob_a_30_jours = jours_30.iloc[0]['probability'] if not jours_30.empty else df_curve.iloc[-1]['probability']
                             
@@ -460,4 +461,161 @@ elif page == "⏳ M3 - Analyse de Survie (Rechute)":
         else:
             st.info("👈 Ajustez les paramètres post-rééducation du patient (Adhérence et ACWR sont primordiaux) et lancez le modèle pour simuler son risque temporel de rechute.")
             
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ==========================================
+# PAGE 4 : AUTOMATED POST-MATCH (MODULE 4)
+# ==========================================
+elif page == "⚽ M4 - Analyse Post-Match (LLM)":
+    st.markdown("""
+    <div class="header-container" style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);">
+        <div class="logo-box">⚽</div>
+        <div>
+            <h1>Analyse Tactique & Rapports Génératifs</h1>
+            <p>Module M4 : Intelligence Artificielle (GPT-4o-mini) à sorties JSON strictes et respect de la philosophie de jeu</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.sidebar:
+        st.markdown("### 📊 Données de Rencontre")
+        opponent = st.text_input("Adversaire", value="Olympique de Marseille")
+        goals_for = st.number_input("Buts Marqués", value=2, min_value=0)
+        goals_against = st.number_input("Buts Encaissés", value=1, min_value=0)
+        result_text = "Victoire" if goals_for > goals_against else ("Défaite" if goals_for < goals_against else "Nul")
+        formation = st.selectbox("Schéma Initial", ["4-3-3", "4-2-3-1", "3-5-2", "4-4-2"])
+        philosophy = st.selectbox("Philosophie Tactique du Club", ["Jeu de Position (Possession)", "Gegenpressing (Klopp)", "Bloc Bas & Contre"])
+        tactical_notes = st.text_area("Notes", "Pressing haut au niveau du rond central, relancer rapidement par les ailes.")
+
+    col_inputs, col_results = st.columns([1, 1.2], gap="large")
+
+    with col_inputs:
+        st.markdown('<div class="dashboard-card"><div class="card-title">📊 Statistiques Collectives</div>', unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            possession = st.slider("Possession (%)", 30, 70, 58)
+            pass_acc = st.slider("Précision Passes (%)", 50, 95, 84)
+            shot_acc = st.slider("Tirs Cadrés (%)", 10, 90, 45)
+            pressure_idx = st.slider("Pression Collective", 10, 100, 72)
+        with c2:
+            xg = st.number_input("Expected Goals (xG)", value=2.15, step=0.1)
+            xga = st.number_input("Expected Goals Against (xGA)", value=1.05, step=0.1)
+            ppda = st.number_input("PPDA (Intensité Pressing)", value=9.2, step=0.5)
+            field_tilt = st.slider("Field Tilt (Domination %)", 10, 90, 64)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="dashboard-card"><div class="card-title">🛡️ Profil Tactique Observé</div>', unsafe_allow_html=True)
+        t1, t2 = st.columns(2)
+        with t1:
+            pressing = st.selectbox("Intensité Pressing", ["Élevée", "Moyenne", "Basse"])
+            buildup = st.selectbox("Construction", ["Mixte", "Lente/Patiente", "Rapide"])
+            wing_play = st.selectbox("Jeu sur les ailes", ["Intense", "Modéré", "Faible"])
+        with t2:
+            compactness = st.selectbox("Compacité", ["Bloc Compact", "Bloc Étiré", "Fragilité Axiale"])
+            transition = st.selectbox("Vitesse Transition", ["Rapide", "Standard", "Lente"])
+            setpiece = st.selectbox("CPA", ["Forte", "Neutre", "Faible"])
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_results:
+        st.markdown('<div class="dashboard-card"><div class="card-title">🏃‍♂️ Performance Individuelle (Joueur Clé)</div>', unsafe_allow_html=True)
+        j1, j2 = st.columns(2)
+        with j1:
+            p_name = st.text_input("Joueur", "Amine Gouiri")
+            p_pos = st.selectbox("Poste", ["Ailier Gauche", "Milieu Central", "Buteur", "Défenseur"])
+            p_rating = st.slider("Note Match", 1.0, 10.0, 8.1, step=0.1)
+        with j2:
+            p_goals = st.number_input("Buts", value=1, min_value=0)
+            p_assists = st.number_input("Passes Dec.", value=1, min_value=0)
+            p_sprints = st.number_input("Sprints (>25km/h)", value=14, min_value=0)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if st.button("🔮 Lancer l'Analyse Tactique Intégrale", use_container_width=True):
+            # Préparation des requêtes JSON
+            payload_match = {
+                "matchId": 101, "opponent": opponent, "result": result_text,
+                "goalsFor": goals_for, "goalsAgainst": goals_against, "formation": formation,
+                "tacticalNotes": tactical_notes, "clubPhilosophy": philosophy,
+                "teamAnalytics": {
+                    "possession": possession, "passAccuracy": pass_acc, "shotAccuracy": shot_acc,
+                    "pressureIndex": pressure_idx, "xg": xg, "xga": xga, "ppda": ppda, "fieldTilt": field_tilt
+                },
+                "tacticalAnalysis": {
+                    "pressingIntensity": pressing, "buildupSpeed": buildup, "wingPlay": wing_play,
+                    "counterAttackEfficiency": "Standard", "defensiveCompactness": compactness,
+                    "transitionSpeed": transition, "setPieceEffectiveness": setpiece
+                },
+                "events": [
+                    {"minute": 12, "type": "BUT", "player": p_name, "detail": "Enroulé du pied droit"},
+                    {"minute": 34, "type": "BUT", "player": "Adversaire", "detail": "Transition rapide"},
+                    {"minute": 75, "type": "PASSE_DECISIVE", "player": p_name, "detail": "Passe millimétrée"}
+                ],
+                "playerPerformances": []
+            }
+            
+            payload_player = {
+                "playerId": 45, "playerName": p_name, "position": p_pos,
+                "goals": p_goals, "assists": p_assists, "rating": p_rating,
+                "distanceCovered": 10.8, "sprintCount": p_sprints,
+                "passAccuracy": 86.5, "touchCount": 58
+            }
+            
+            tab1, tab2, tab3 = st.tabs(["📋 Rapport Post-Match Structuré", "👤 Insight Joueur Clé", "💡 Recommandations Coach"])
+            
+            with tab1:
+                with st.spinner("Génération du rapport de match..."):
+                    try:
+                        res = requests.post(API_URL_LLM_MATCH, json=payload_match)
+                        if res.status_code == 200:
+                            data = res.json()
+                            st.markdown(f"### 📊 Synthèse Globale\n{data['global_summary']}")
+                            
+                            st.markdown("#### ⚡ Cadre Tactique")
+                            c_p, c_t, c_d = st.columns(3)
+                            with c_p:
+                                st.info(f"**Phase Offensive / Possession**\n\n{data['tactical_framework']['possession_phase']['assessment']}\n\n*Corrélation statistique : {data['tactical_framework']['possession_phase']['metric_correlation']}*")
+                            with c_t:
+                                st.warning(f"**Phase de Transition**\n\n{data['tactical_framework']['transition_phase']['assessment']}\n\n*Corrélation statistique : {data['tactical_framework']['transition_phase']['metric_correlation']}*")
+                            with c_d:
+                                st.error(f"**Phase Défensive**\n\n{data['tactical_framework']['defensive_phase']['assessment']}\n\n*Corrélation statistique : {data['tactical_framework']['defensive_phase']['metric_correlation']}*")
+                                
+                            st.markdown("#### 📝 Directives d'Entraînement Prioritaires")
+                            for idx, directive in enumerate(data['immediate_directives'], 1):
+                                st.success(f"{idx}. {directive}")
+                        else:
+                            st.error(res.text)
+                    except Exception as e:
+                        st.error(f"Injoignable : {e}")
+
+            with tab2:
+                with st.spinner("Génération de l'évaluation joueur..."):
+                    try:
+                        res = requests.post(API_URL_LLM_PLAYER, json=payload_player)
+                        if res.status_code == 200:
+                            data = res.json()
+                            st.markdown(f"### 👤 {p_name} ({p_pos})")
+                            st.markdown(f"**🎯 Impact Tactique :**\n{data['tactical_impact']}")
+                            st.markdown(f"**⚡ Analyse de la Charge Physique :**\n{data['physical_assessment']}")
+                            st.markdown(f"**⚠️ Faille Technique à corriger :**\n{data['technical_flaw']}")
+                            st.markdown(f"**🛠️ Exercice Dédié Recommandé :**\n*{data['targeted_drill']}*")
+                        else:
+                            st.error(res.text)
+                    except Exception as e:
+                        st.error(f"Injoignable : {e}")
+
+            with tab3:
+                with st.spinner("Génération des suggestions tactiques..."):
+                    try:
+                        res = requests.post(API_URL_LLM_TACTICAL, json=payload_match)
+                        if res.status_code == 200:
+                            data = res.json()
+                            st.error(f"**Faille Identifiée dans le Bloc :**\n{data['vulnerability_identified']}")
+                            st.warning(f"**Preuve Statistique à l'Appui :**\n{data['statistical_proof']}")
+                            st.success(f"**Correctif Tactique Proposé :**\n{data['tactical_fix']}")
+                            st.info(f"**Résultat Attendu :**\n{data['expected_outcome']}")
+                        else:
+                            st.error(res.text)
+                    except Exception as e:
+                        st.error(f"Injoignable : {e}")
+        else:
+            st.info("💡 Ajustez les paramètres tactiques ou statistiques et lancez l'Analyse Tactique Intégrale pour obtenir les synthèses détaillées de l'IA.")
         st.markdown('</div>', unsafe_allow_html=True)

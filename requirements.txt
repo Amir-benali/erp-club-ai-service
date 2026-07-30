@@ -8,3 +8,6 @@ xgboost
 shap
 joblib
 matplotlib
+python-dotenv
+openai
+lifelines
