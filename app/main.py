@@ -1,82 +1,115 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-import os
-import time
-import json
-import random
+from typing import Any, Dict, List, Optional
 import pandas as pd
 import joblib
-from dotenv import load_dotenv
+import shap
+import os
 
-# Chargement des variables d'environnement depuis .env
-load_dotenv()
+# ---------------------------------------------------------
+# OpenAPI / Swagger Metadata
+# ---------------------------------------------------------
 
-try:
-    import shap
-    SHAP_AVAILABLE = True
-except ImportError:
-    SHAP_AVAILABLE = False
+tags_metadata = [
+    {
+        "name": "Health",
+        "description": "Service health-check endpoint. Returns the current status and version of the AI service.",
+    },
+    {
+        "name": "Injury Risk",
+        "description": (
+            "**Module 1 — Global Injury Risk (XGBoost).** "
+            "Predicts the probability that a player will sustain an injury based on workload, "
+            "biometric, and wellness features. Supports native Viiv GX17 sensor data."
+        ),
+    },
+    {
+        "name": "Injury Zone",
+        "description": (
+            "**Module 2 — Anatomical Zone Mapping (Random Forest / LightGBM).** "
+            "Classifies which body zone (e.g. knee, hamstring, ankle) is most likely to be injured, "
+            "given player profile and load metrics."
+        ),
+    },
+    {
+        "name": "Relapse Survival",
+        "description": (
+            "**Module 3 — Relapse Survival Analysis (Cox Proportional Hazards).** "
+            "Estimates the survival curve (probability of staying injury-free over time) "
+            "for a player returning from injury."
+        ),
+    },
+]
 
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-
-# =========================================================
-# CONFIGURATION CENTRALISÉE DE LA CLÉ OPENAI
-# =========================================================
-# La clé est chargée depuis le fichier .env (OPENAI_API_KEY)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-if OPENAI_API_KEY:
-    print("[OK] [MODULE 4] Cle OpenAI chargee depuis .env")
-else:
-    print("[WARN] [MODULE 4] OPENAI_API_KEY absente du .env. Mode demo active.")
-
-# Initialisation de l'application FastAPI de production
 app = FastAPI(
-    title="ERP Club AI - Professional Engine",
-    description="Moteur IA complet de production - Risques, Anatomie, Survie et Analyses Tactiques LLM.",
-    version="5.1.0"
+    title="ERP Club — AI Service",
+    description=(
+        "## ERP Club AI Microservice — Viiv GX17 Integration\n\n"
+        "This service exposes **three independent AI modules** for sports-medicine decision support:\n\n"
+        "| Module | Endpoint | Algorithm |\n"
+        "|--------|----------|-----------|\n"
+        "| Global Injury Risk | `POST /predict-injury` | XGBoost + SHAP |\n"
+        "| Anatomical Zone Mapping | `POST /predict-injury-zone` | Random Forest / LightGBM |\n"
+        "| Relapse Survival | `POST /predict-relapse` | Cox Proportional Hazards |\n\n"
+        "### Viiv GX17 Sensor Integration\n"
+        "Each request body is centered on a `viiv` block containing raw sensor readings "
+        "(HR, SpO₂, HRV, Strain, Recovery %, …) plus only the supplementary fields that the "
+        "target model cannot infer from Viiv alone.\n\n"
+        "### Authentication\n"
+        "No authentication is required for this internal microservice. "
+        "Secure network-level access is enforced at the API gateway."
+    ),
+    version="5.0.0",
+    openapi_tags=tags_metadata,
+    contact={
+        "name": "ERP Club — Data & AI Team",
+        "email": "ai@erp-club.io",
+    },
+    license_info={
+        "name": "Proprietary — ERP Club",
+    },
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
-# =========================================================
-# CHARGEMENT SÉCURISÉ DES MODÈLES PRÉDICTIFS (M1, M2, M3)
-# =========================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------
+# 1. CHARGEMENT ROBUSTE DES MODÈLES (Au démarrage)
+# ---------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # --- MODULE 1 : Risque Global (XGBoost) ---
 MODEL_XGB_PATH = os.path.join(BASE_DIR, "ml_core", "artifacts", "injury_model.pkl")
 SCALER_PATH = os.path.join(BASE_DIR, "ml_core", "artifacts", "scaler.pkl")
-xgb_model = None
-scaler = None
-explainer = None
 
 try:
-    if os.path.exists(MODEL_XGB_PATH) and os.path.exists(SCALER_PATH):
-        xgb_model = joblib.load(MODEL_XGB_PATH)
-        scaler = joblib.load(SCALER_PATH)
-        if SHAP_AVAILABLE:
-            explainer = shap.TreeExplainer(xgb_model)
-        print("[OK] [MODULE 1] Modele XGBoost charge.")
-    else:
-        # Recherche alternative à la racine
-        ALT_XGB = os.path.join(BASE_DIR, "injury_model.pkl")
-        ALT_SCALER = os.path.join(BASE_DIR, "scaler.pkl")
-        if os.path.exists(ALT_XGB) and os.path.exists(ALT_SCALER):
-            xgb_model = joblib.load(ALT_XGB)
-            scaler = joblib.load(ALT_SCALER)
-            if SHAP_AVAILABLE:
-                explainer = shap.TreeExplainer(xgb_model)
-            print("[OK] [MODULE 1] Modele XGBoost charge depuis la racine.")
+    xgb_model = joblib.load(MODEL_XGB_PATH)
+    scaler = joblib.load(SCALER_PATH)
+    explainer = shap.TreeExplainer(xgb_model)
+    print("[OK] [MODULE 1] Modele XGBoost charge avec succes.")
 except Exception as e:
-    print(f"[WARN] [MODULE 1] Mode simulation actif pour XGBoost : {e}")
+    xgb_model = None
+    print(f"[WARN] [MODULE 1] Erreur XGBoost : {e}")
 
-# --- MODULE 2 : Cartographie des Zones (Random Forest) ---
+# --- MODULE 2 : Cartographie des Zones (Random Forest / LightGBM) ---
 model_zone_artifact = None
 possible_zone_paths = [
     os.path.join(BASE_DIR, "ml_core", "models", "injury_zone_model.joblib"),
+    os.path.join(BASE_DIR, "ml_core", "artifacts", "injury_zone_model.joblib"),
     os.path.join(BASE_DIR, "models", "injury_zone_model.joblib"),
     os.path.join(BASE_DIR, "injury_zone_model.joblib")
 ]
@@ -85,15 +118,20 @@ for path in possible_zone_paths:
     if os.path.exists(path):
         try:
             model_zone_artifact = joblib.load(path)
-            print(f"[OK] [MODULE 2] Modele Zone de Blessure charge.")
+            print("[OK] [MODULE 2] Modele 'Zone de Blessure' charge avec succes.")
             break
-        except Exception as e:
-            print(f"[WARN] [MODULE 2] Erreur chargement de {path} : {e}")
+        except Exception: pass
+if not model_zone_artifact:
+    print(
+        "[WARN] [MODULE 2] Fichier 'injury_zone_model.joblib' introuvable."
+        f"Chemins testes: {possible_zone_paths}"
+    )
 
-# --- MODULE 3 : Analyse de Survie (Cox PH) ---
+# --- MODULE 3 : Analyse de Survie (Cox Proportional Hazards) ---
 model_survival_artifact = None
 possible_survival_paths = [
     os.path.join(BASE_DIR, "ml_core", "models", "relapse_survival_model.joblib"),
+    os.path.join(BASE_DIR, "ml_core", "artifacts", "relapse_survival_model.joblib"),
     os.path.join(BASE_DIR, "models", "relapse_survival_model.joblib"),
     os.path.join(BASE_DIR, "relapse_survival_model.joblib")
 ]
@@ -102,67 +140,179 @@ for path in possible_survival_paths:
     if os.path.exists(path):
         try:
             model_survival_artifact = joblib.load(path)
-            print(f"[OK] [MODULE 3] Modele d'Analyse de Survie charge.")
+            print("[OK] [MODULE 3] Modele 'Analyse de Survie' charge avec succes.")
             break
         except Exception as e: 
-            print(f"[WARN] [MODULE 3] Erreur chargement de {path} : {e}")
+            print(f"[WARN] [MODULE 3] Erreur de lecture : {e}")
+if not model_survival_artifact:
+    print(
+        "[WARN] [MODULE 3] Fichier 'relapse_survival_model.joblib' introuvable. "
+        f"Chemins testes: {possible_survival_paths}"
+    )
 
-# =========================================================
-# SCHÉMAS DE SORTIE STRUCTURÉS POUR LE LLM (MODULE 4)
-# =========================================================
 
-class KeyMomentAnalysis(BaseModel):
-    minute: int
-    event_type: str
-    player_involved: str
-    tactical_impact: str = Field(description="Analyse de l'impact de cet événement sur le bloc équipe")
+# ---------------------------------------------------------
+# 2. SCHÉMAS VIIV GX17 (Données brutes du capteur)
+# ---------------------------------------------------------
 
-class PhaseAnalysis(BaseModel):
-    assessment: str = Field(description="Bilan qualitatif de cette phase de jeu")
-    metric_correlation: str = Field(description="Lien fait avec une statistique clé (ex: PPDA, xG)")
+class ViivGX17Data(BaseModel):
+    """
+    Données brutes transmises par l'application mobile depuis le capteur Viiv GX17 via Bluetooth.
+    Toutes les valeurs sont requises dans le payload mobile.
+    """
+    # Cardiaque
+    heart_rate: float = Field(..., description="Fréquence cardiaque (FC) en bpm — ex: 97")
+    spo2: float = Field(..., description="Saturation en oxygène SpO₂ en % — ex: 98.5")
+    hrv_ms: float = Field(..., description="Variabilité de la fréquence cardiaque (HRV) en ms — ex: 42.0")
 
-class TacticalPhases(BaseModel):
-    possession_phase: PhaseAnalysis
-    transition_phase: PhaseAnalysis
-    defensive_phase: PhaseAnalysis
+    # Bien-être
+    stress_score: float = Field(..., description="Score de stress Viiv (0–100) — ex: 35.0")
+    energy_pct: float = Field(..., description="Niveau d'énergie en % — ex: 100.0")
+    sleep_score: float = Field(..., description="Score de sommeil Viiv (0–10 ou heures) — ex: 7.5")
+    recovery_pct: float = Field(..., description="Score de récupération en % — ex: 30.0")
+    strain: float = Field(..., description="Charge d'effort cumulée Viiv (0–21) — ex: 0.0")
 
-class StructuredMatchReport(BaseModel):
-    global_summary: str = Field(description="Résumé analytique et managérial du match")
-    tactical_framework: TacticalPhases
-    key_moments_breakdown: List[KeyMomentAnalysis]
-    immediate_directives: List[str] = Field(description="3 directives prioritaires pour l'entraînement")
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "heart_rate": 97.0,
+                "spo2": 98.5,
+                "hrv_ms": 42.0,
+                "stress_score": 35.0,
+                "energy_pct": 100.0,
+                "sleep_score": 7.5,
+                "recovery_pct": 30.0,
+                "strain": 0.0,
+            }
+        }
+    }
 
-class StructuredPlayerInsight(BaseModel):
-    tactical_impact: str = Field(description="Analyse du positionnement et respect des consignes")
-    physical_assessment: str = Field(description="Analyse de la charge physique par rapport au poste")
-    technical_flaw: str = Field(description="Point technique précis à corriger")
-    targeted_drill: str = Field(description="Exercice spécifique de correction (nom, structure, intensité)")
+    def derive_sommeil(self) -> Optional[float]:
+        """Convertit sleep_score Viiv → échelle 1–10 (sommeil)."""
+        if self.sleep_score is None:
+            return None
+        return round(max(1.0, min(10.0, float(self.sleep_score))), 2)
 
-class StructuredTacticalSuggestion(BaseModel):
-    vulnerability_identified: str = Field(description="Faille structurelle identifiée dans le bloc")
-    statistical_proof: str = Field(description="La statistique qui prouve cette faille")
-    tactical_fix: str = Field(description="Ajustement précis (changement de schéma, consignes)")
-    expected_outcome: str = Field(description="Bénéfice tactique escompté")
+    def derive_stress(self) -> Optional[float]:
+        """Convertit stress_score Viiv (0–100) → échelle 1–10."""
+        if self.stress_score is None:
+            return None
+        return round(max(1.0, min(10.0, self.stress_score / 10.0)), 2)
 
-# =========================================================
-# SCHÉMAS DE SAISIE DE DONNÉES (INPUT SCHEMAS)
-# =========================================================
+    def derive_fatigue(self) -> Optional[float]:
+        """
+        Dérive la fatigue depuis HRV (ms) : HRV faible = fatigue élevée.
+        HRV typique athlète : 20–80 ms → fatigue 1–10 (inversé).
+        """
+        if self.hrv_ms is None:
+            return None
+        # Normalisation inverse : HRV=20ms → fatigue=9, HRV=80ms → fatigue=1
+        hrv_clamped = max(10.0, min(100.0, self.hrv_ms))
+        fatigue = 10.0 - ((hrv_clamped - 10.0) / 90.0) * 9.0
+        return round(max(1.0, min(10.0, fatigue)), 2)
+
+    def derive_acute_load(self, base_load: float = 5000.0) -> Optional[float]:
+        """Estime l'Acute Load depuis le Strain Viiv (0–21 → load approximatif)."""
+        if self.strain is None:
+            return None
+        return round(base_load + (self.strain * 200.0), 0)
+
+    def derive_recovery_score(self) -> Optional[float]:
+        """Recovery % Viiv → score 0–100 pour le module de survie."""
+        return self.recovery_pct  # Déjà en %
+
+    def derive_fatigue_index(self) -> Optional[float]:
+        """Dérive l'index de fatigue (0–100) depuis HRV."""
+        fat = self.derive_fatigue()
+        if fat is None:
+            return None
+        return round(fat * 10.0, 2)  # 1–10 → 10–100
+
+    def derive_stress_level(self) -> Optional[float]:
+        """Convertit stress_score (0–100) → niveau 0–1 pour module survie."""
+        if self.stress_score is None:
+            return None
+        return round(max(0.0, min(1.0, self.stress_score / 100.0)), 3)
+
+
+# ---------------------------------------------------------
+# 3. SCHÉMAS DE DONNÉES IA (Pydantic) — avec champs Viiv intégrés
+# ---------------------------------------------------------
 
 class PlayerFeatures(BaseModel):
     playerId: int
-    totalLoad: float
-    sommeil: float
-    fatigue: float
-    douleurMusculaire: float
-    stress: float
-    acuteLoad: float
-    chronicLoad: float
-    ACWR: float
-    sommeil_7d_mean: float = 7.0
-    fatigue_7d_mean: float = 4.0
-    douleurMusculaire_7d_mean: float = 3.0
-    stress_7d_mean: float = 4.0
-    model: str = "XGBoost (default)"
+
+    # --- Champs Viiv GX17 bruts (transmis par l'app mobile) ---
+    viiv: ViivGX17Data = Field(
+        ...,
+        description="Données brutes du capteur Viiv GX17 transmises par l'app mobile."
+    )
+
+    # --- Champs IA requis hors Viiv ---
+    totalLoad: float = Field(..., description="Charge de travail prévue aujourd'hui (au)")
+    douleurMusculaire: float = Field(..., description="Douleurs musculaires (1–10)")
+    acuteLoad: float = Field(..., description="Charge aiguë 7 jours")
+    chronicLoad: float = Field(..., description="Charge chronique 28 jours")
+    ACWR: float = Field(..., description="Ratio ACWR")
+    sommeil_7d_mean: float = Field(..., description="Sommeil moyen sur 7 jours")
+    fatigue_7d_mean: float = Field(..., description="Fatigue moyenne sur 7 jours")
+    douleurMusculaire_7d_mean: float = Field(..., description="Douleurs musculaires moyennes sur 7 jours")
+    stress_7d_mean: float = Field(..., description="Stress moyen sur 7 jours")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "playerId": 0,
+                "totalLoad": 850.0,
+                "douleurMusculaire": 3.0,
+                "acuteLoad": 5950.0,
+                "chronicLoad": 5100.0,
+                "ACWR": 1.17,
+                "sommeil_7d_mean": 7.0,
+                "fatigue_7d_mean": 4.0,
+                "douleurMusculaire_7d_mean": 3.0,
+                "stress_7d_mean": 4.0,
+                "viiv": {
+                    "heart_rate": 97.0,
+                    "spo2": 98.5,
+                    "hrv_ms": 42.0,
+                    "stress_score": 35.0,
+                    "energy_pct": 100.0,
+                    "sleep_score": 7.5,
+                    "recovery_pct": 30.0,
+                    "strain": 0.0,
+                },
+            }
+        }
+    }
+
+    def resolve_inputs(self) -> dict:
+        """
+        Résout les champs IA finals à partir des données Viiv GX17 obligatoires
+        et des champs manuels obligatoires fournis par l'application mobile.
+        """
+        v = self.viiv
+
+        sommeil_final = v.derive_sommeil()
+        stress_final = v.derive_stress()
+        fatigue_final = v.derive_fatigue()
+        acute_final = v.derive_acute_load(self.acuteLoad) if v.strain is not None else self.acuteLoad
+        acwr_final = self.ACWR
+
+        return {
+            "totalLoad": self.totalLoad,
+            "sommeil": sommeil_final,
+            "fatigue": fatigue_final,
+            "douleurMusculaire": self.douleurMusculaire,
+            "stress": stress_final,
+            "acuteLoad": acute_final,
+            "chronicLoad": self.chronicLoad,
+            "ACWR": acwr_final,
+            "sommeil_7d_mean": self.sommeil_7d_mean,
+            "fatigue_7d_mean": self.fatigue_7d_mean,
+            "douleurMusculaire_7d_mean": self.douleurMusculaire_7d_mean,
+            "stress_7d_mean": self.stress_7d_mean,
+        }
 
 FEATURES_ORDER_XGB = [
     'totalLoad', 'sommeil', 'fatigue', 'douleurMusculaire', 'stress', 
@@ -171,393 +321,424 @@ FEATURES_ORDER_XGB = [
 ]
 
 class ZonePredictionInput(BaseModel):
-    playerId: int
-    position: str
-    foot: str
-    age: int
-    fifa_rating: int
-    acuteLoad: float
-    chronicLoad: float
-    ACWR: float
-    douleurMusculaire: float
-    souplesse: float
-    agilite: float
+    playerId: int = Field(..., description="Player identifier")
+    position: str = Field(..., description="Player position")
+    foot: str = Field(..., description="Preferred foot")
+    age: int = Field(..., description="Player age")
+    fifa_rating: int = Field(..., description="FIFA rating")
+    acuteLoad: float = Field(..., description="Charge aiguë 7 jours")
+    chronicLoad: float = Field(..., description="Charge chronique 28 jours")
+    ACWR: float = Field(..., description="Ratio ACWR")
+    douleurMusculaire: float = Field(..., description="Douleurs musculaires")
+    souplesse: float = Field(..., description="Souplesse")
+    agilite: float = Field(..., description="Agilité")
+
+    # Champs Viiv GX17 requis (transmis depuis l'app)
+    viiv: ViivGX17Data = Field(
+        ...,
+        description="Données Viiv GX17 brutes transmises par l'app mobile."
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "playerId": 0,
+                "position": "Attaquant",
+                "foot": "Droitier",
+                "age": 24,
+                "fifa_rating": 75,
+                "acuteLoad": 6000,
+                "chronicLoad": 4500,
+                "ACWR": 1.33,
+                "douleurMusculaire": 4.0,
+                "souplesse": 6.0,
+                "agilite": 8.0,
+                "viiv": {
+                    "heart_rate": 97.0,
+                    "spo2": 98.5,
+                    "hrv_ms": 42.0,
+                    "stress_score": 35.0,
+                    "energy_pct": 100.0,
+                    "sleep_score": 7.5,
+                    "recovery_pct": 30.0,
+                    "strain": 0.0,
+                },
+            }
+        }
+    }
 
 class RelapseSurvivalInput(BaseModel):
-    playerId: int
-    recovery_score: float
-    sleep_quality: float
-    stress_level: float
-    fatigue_index: float
-    physio_adherence: float
-    post_recovery_ACWR: float
+    playerId: int = Field(..., description="Player identifier")
 
-class MatchEventInput(BaseModel):
-    minute: int
-    type: str
-    player: str
-    detail: Optional[str] = ""
+    # Champs Viiv GX17 bruts (transmis depuis l'app mobile)
+    viiv: ViivGX17Data = Field(
+        ...,
+        description="Données Viiv GX17 transmises par l'app mobile."
+    )
 
-class PlayerPerformanceInput(BaseModel):
-    playerId: int
-    playerName: str
-    position: str
-    goals: int
-    assists: int
-    rating: float
-    distanceCovered: float
-    sprintCount: int
-    passAccuracy: float
-    touchCount: int
+    # Champs IA requis hors Viiv
+    physio_adherence: float = Field(..., description="Adhérence protocole Physio (%)")
+    post_recovery_ACWR: float = Field(..., description="ACWR projeté au retour au jeu")
 
-class TeamAnalyticsInput(BaseModel):
-    possession: float
-    passAccuracy: float
-    shotAccuracy: float
-    pressureIndex: float
-    xg: float
-    xga: float
-    ppda: float
-    fieldTilt: float
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "playerId": 0,
+                "viiv": {
+                    "heart_rate": 97.0,
+                    "spo2": 98.5,
+                    "hrv_ms": 42.0,
+                    "stress_score": 35.0,
+                    "energy_pct": 100.0,
+                    "sleep_score": 7.5,
+                    "recovery_pct": 30.0,
+                    "strain": 0.0,
+                },
+                "physio_adherence": 85.0,
+                "post_recovery_ACWR": 1.1,
+            }
+        }
+    }
 
-class TacticalAnalysisInput(BaseModel):
-    pressingIntensity: str
-    buildupSpeed: str
-    wingPlay: str
-    counterAttackEfficiency: str
-    defensiveCompactness: str
-    transitionSpeed: str
-    setPieceEffectiveness: str
+    def resolve_inputs(self) -> dict:
+        v = self.viiv
+        return {
+            "recovery_score": v.derive_recovery_score(),
+            "sleep_quality": v.derive_sommeil(),
+            "stress_level": v.derive_stress_level(),
+            "fatigue_index": v.derive_fatigue_index(),
+            "physio_adherence": self.physio_adherence,
+            "post_recovery_ACWR": self.post_recovery_ACWR,
+        }
 
-class MatchAnalysisInput(BaseModel):
-    matchId: int
-    opponent: str
-    result: str
-    goalsFor: int
-    goalsAgainst: int
-    formation: str
-    tacticalNotes: Optional[str] = ""
-    clubPhilosophy: str = "Jeu de Position (Possession)"
-    teamAnalytics: TeamAnalyticsInput
-    tacticalAnalysis: TacticalAnalysisInput
-    events: List[MatchEventInput]
-    playerPerformances: List[PlayerPerformanceInput]
 
-# =========================================================
-# MOTEURS D'APPEL ET FALLBACKS DE PRODUCTION (LLM)
-# =========================================================
+# ---------------------------------------------------------
+# 4. RESPONSE MODELS (Swagger schemas)
+# ---------------------------------------------------------
 
-def call_openai_structured(prompt: str, system_instruction: str, response_schema: Any) -> Dict[str, Any]:
-    if not OPENAI_AVAILABLE or not OPENAI_API_KEY:
-        print("[WARN] [LLM API] Mode demo active : cle absente ou package manquant.")
-        return generate_mock_structured_response(response_schema)
+class ShapFactor(BaseModel):
+    feature: str = Field(..., description="Feature name")
+    contribution: float = Field(..., description="SHAP contribution value")
+    impact: str = Field(..., description="'négatif' if the feature increases risk, 'positif' otherwise")
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    max_retries = 3
-    delay = 1.0
-    
-    for attempt in range(max_retries):
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": prompt}
+class ViivSnapshot(BaseModel):
+    heart_rate: Optional[float] = Field(None, description="Heart rate (bpm)")
+    spo2: Optional[float] = Field(None, description="SpO₂ (%)")
+    hrv_ms: Optional[float] = Field(None, description="HRV (ms)")
+    stress_score: Optional[float] = Field(None, description="Viiv stress score (0–100)")
+    energy_pct: Optional[float] = Field(None, description="Energy level (%)")
+    sleep_score: Optional[float] = Field(None, description="Viiv sleep score")
+    recovery_pct: Optional[float] = Field(None, description="Recovery (%)")
+    strain: Optional[float] = Field(None, description="Viiv strain (0–21)")
+
+class InjuryRiskResponse(BaseModel):
+    playerId: int = Field(..., description="Player identifier")
+    riskScore: float = Field(..., ge=0.0, le=1.0, description="Injury probability (0–1)")
+    riskLevel: str = Field(..., description="'Faible', 'Modéré', or 'Critique'")
+    factors: List[ShapFactor] = Field(..., description="SHAP-based contributing factors, sorted by absolute impact")
+    resolved_inputs: Dict[str, Any] = Field(..., description="Final feature values used for prediction (after Viiv resolution)")
+    viiv_data: Optional[ViivSnapshot] = Field(None, description="Raw Viiv GX17 snapshot used in this request")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "playerId": 42,
+                "riskScore": 0.73,
+                "riskLevel": "Critique",
+                "factors": [
+                    {"feature": "ACWR", "contribution": 0.312, "impact": "négatif"},
+                    {"feature": "fatigue", "contribution": 0.187, "impact": "négatif"},
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.3
-            )
-            return json.loads(response.choices[0].message.content)
-        except Exception as e:
-            if attempt == max_retries - 1:
-                print(f"[ERROR] [LLM API] Echec de l'appel : {e}")
-                return generate_mock_structured_response(response_schema)
-            time.sleep(delay)
-            delay *= 2.0
+                "resolved_inputs": {"totalLoad": 850.0, "sommeil": 6.5},
+                "viiv_data": {"heart_rate": 97.0, "hrv_ms": 28.0},
+            }
+        }
+    }
 
-def generate_mock_structured_response(schema_type: Any) -> Dict[str, Any]:
-    if schema_type == StructuredMatchReport:
-        return {
-            "global_summary": "[SIMULÉ] Match maîtrisé. L'équipe a su imposer son rythme territorial mais a souffert de pertes de balle axiales évitables en fin de seconde période.",
-            "tactical_framework": {
-                "possession_phase": {
-                    "assessment": "Circulation fluide sur la largeur.",
-                    "metric_correlation": "Possession élevée et précision des passes optimale."
+class InjuryZoneResponse(BaseModel):
+    playerId: int = Field(..., description="Player identifier")
+    predictions: Dict[str, float] = Field(
+        ...,
+        description="Probability per anatomical zone (keys = zone names, values = probability 0–1)"
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "playerId": 42,
+                "predictions": {
+                    "Genou": 0.41,
+                    "Ischio-jambiers": 0.32,
+                    "Cheville": 0.15,
+                    "Adducteur": 0.12,
                 },
-                "transition_phase": {
-                    "assessment": "Contre-pressing immédiat perfectible.",
-                    "metric_correlation": "Indice PPDA démontrant une transition moyenne."
-                },
-                "defensive_phase": {
-                    "assessment": "Charnière solide mais bloc parfois étiré sur les côtés.",
-                    "metric_correlation": "Valeur xGA limitée."
-                }
-            },
-            "key_moments_breakdown": [
-                {
-                    "minute": 12, "event_type": "BUT", "player_involved": "Joueur Clé",
-                    "tactical_impact": "Permet de stabiliser le bloc équipe et d'aspirer le pressing adverse."
-                }
-            ],
-            "immediate_directives": [
-                "Travailler la transition défensive immédiate sur perte de balle axiale.",
-                "Améliorer les combinaisons d'attaques placées sur les couloirs.",
-                "Exercices aérobies spécifiques pour l'entrejeu."
-            ]
+            }
         }
-    elif schema_type == StructuredPlayerInsight:
-        return {
-            "tactical_impact": "[SIMULÉ] Excellent repli et respect des consignes d'étirement du bloc adverse.",
-            "physical_assessment": "Gros volume de course et sprints répétés avec intensité.",
-            "technical_flaw": "Tendance à retarder la passe décisive au profit de touches supplémentaires.",
-            "targeted_drill": "Rondo de transition 4v2 avec contrainte de jeu à une touche."
-        }
-    elif schema_type == StructuredTacticalSuggestion:
-        return {
-            "vulnerability_identified": "[SIMULÉ] Déficit d'occupation des espaces axiaux en phase défensive de transition.",
-            "statistical_proof": "PPDA élevé et occasions créées par l'adversaire au cœur du jeu.",
-            "tactical_fix": "Passage en double pivot asymétrique lors des phases offensives.",
-            "expected_outcome": "Couverture axiale immédiate en cas de perte de balle."
-        }
-    return {}
+    }
 
-# =========================================================
-# ENDPOINTS API DE PRODUCTION (M1, M2, M3, M4)
-# =========================================================
+class SurvivalPoint(BaseModel):
+    day: int = Field(..., description="Day along the survival timeline")
+    probability: float = Field(..., ge=0.0, le=1.0, description="Probability of remaining injury-free at this day")
 
-@app.get("/")
+class RelapseSurvivalResponse(BaseModel):
+    playerId: int = Field(..., description="Player identifier")
+    c_index: float = Field(..., description="Concordance index of the Cox model (model quality, closer to 1 is better)")
+    survival_curve: List[SurvivalPoint] = Field(..., description="Day-by-day survival probability curve")
+    resolved_inputs: Dict[str, Any] = Field(..., description="Final feature values used for prediction")
+    viiv_data: Optional[Dict[str, Any]] = Field(None, description="Raw Viiv GX17 snapshot (subset relevant to survival)")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "playerId": 42,
+                "c_index": 0.96,
+                "survival_curve": [
+                    {"day": 0, "probability": 1.0},
+                    {"day": 30, "probability": 0.81},
+                    {"day": 90, "probability": 0.54},
+                ],
+                "resolved_inputs": {"recovery_score": 72.0, "sleep_quality": 7.0},
+                "viiv_data": {"recovery_pct": 72.0, "hrv_ms": 38.0},
+            }
+        }
+    }
+
+
+# ---------------------------------------------------------
+# 5. ROUTES DE L'API
+# ---------------------------------------------------------
+
+@app.get(
+    "/",
+    tags=["Health"],
+    summary="Service health check",
+    response_description="Service status, version, and integration info",
+)
 def read_root():
-    return {"status": "online", "modules": ["M1 - Global", "M2 - Zones", "M3 - Survie", "M4 - LLM Tactique"]}
+    """
+    Returns a simple liveness response confirming the AI service is online,
+    together with the current version and Viiv integration status.
+    """
+    return {
+        "message": "ERP Club AI Service est en ligne 🟢",
+        "version": "5.0.0",
+        "viiv_integration": "Viiv GX17 natif — champs `viiv` dans chaque requête POST"
+    }
 
-@app.post("/predict-injury")
+@app.post(
+    "/predict-injury",
+    tags=["Injury Risk"],
+    summary="Predict global injury risk (XGBoost + SHAP)",
+    response_model=InjuryRiskResponse,
+    response_description="Injury probability, risk level, SHAP factors, and resolved inputs",
+    responses={
+        200: {"description": "Prediction successful"},
+        500: {"description": "Model not loaded or prediction error"},
+    },
+)
 def predict_injury_risk(data: PlayerFeatures):
-    # Mode Réel si disponible
-    if xgb_model and scaler:
-        try:
-            features_dict = {col: [getattr(data, col, 0.0)] for col in FEATURES_ORDER_XGB}
-            df_input = pd.DataFrame(features_dict)
-            df_scaled = pd.DataFrame(scaler.transform(df_input), columns=FEATURES_ORDER_XGB)
-            risk_prob = float(xgb_model.predict_proba(df_scaled)[0][1])
+    """
+        Computes the **global injury risk** for a player using the XGBoost model.
+
+    ### Input Resolution
+        - If a `viiv` block is provided, sensor-derived values populate the matching model inputs:
+      - `hrv_ms` → `fatigue`
+      - `stress_score` → `stress`
+      - `sleep_score` → `sommeil`
+      - `strain` → `acuteLoad`
+    - `ACWR` is auto-calculated as `acuteLoad / chronicLoad` when not provided.
+
+    ### Risk Levels
+    | Score | Level |
+    |-------|-------|
+    | > 0.70 | **Critique** |
+    | 0.40 – 0.70 | **Modéré** |
+    | < 0.40 | **Faible** |
+
+    ### SHAP Explainability
+    The `factors` array lists feature contributions (sorted by absolute impact),
+    making predictions **fully explainable** to medical staff.
+    """
+    if not xgb_model:
+        raise HTTPException(status_code=500, detail="Modèle XGBoost non chargé.")
+    try:
+        resolved = data.resolve_inputs()
+        features_dict = {col: [resolved[col]] for col in FEATURES_ORDER_XGB}
+        df_input = pd.DataFrame(features_dict)
+        df_scaled = pd.DataFrame(scaler.transform(df_input), columns=FEATURES_ORDER_XGB)
+        risk_prob = float(xgb_model.predict_proba(df_scaled)[0][1])
+        
+        shap_values = explainer.shap_values(df_scaled)
+        contributions = shap_values[1][0] if isinstance(shap_values, list) else (shap_values[0] if len(shap_values.shape) > 1 else shap_values)
             
-            factors = []
-            if explainer:
-                shap_values = explainer.shap_values(df_scaled)
-                contributions = shap_values[1][0] if isinstance(shap_values, list) else (shap_values[0] if len(shap_values.shape) > 1 else shap_values)
-                for feature_name, contrib in zip(FEATURES_ORDER_XGB, contributions):
-                    if abs(contrib) > 0.01:
-                        factors.append({
-                            "feature": feature_name, 
-                            "contribution": round(float(contrib), 3), 
-                            "impact": "négatif" if contrib > 0 else "positif"
-                        })
-            factors = sorted(factors, key=lambda x: abs(x["contribution"]), reverse=True)[:5]
-            risk_level = "Critique" if risk_prob > 0.70 else ("Modéré" if risk_prob > 0.40 else "Faible")
-            
-            return {
-                "playerId": data.playerId, 
-                "riskScore": round(risk_prob, 2), 
-                "riskLevel": risk_level, 
-                "factors": factors
+        factors = []
+        for feature_name, contrib in zip(FEATURES_ORDER_XGB, contributions):
+            if abs(contrib) > 0.01:
+                factors.append({"feature": feature_name, "contribution": round(float(contrib), 3), "impact": "négatif" if contrib > 0 else "positif"})
+        factors = sorted(factors, key=lambda x: abs(x["contribution"]), reverse=True)
+        
+        risk_level = "Critique" if risk_prob > 0.70 else ("Modéré" if risk_prob > 0.40 else "Faible")
+
+        # Inclure les données Viiv brutes résolues dans la réponse pour la traçabilité
+        viiv_snapshot = None
+        if data.viiv:
+            viiv_snapshot = {
+                "heart_rate": data.viiv.heart_rate,
+                "spo2": data.viiv.spo2,
+                "hrv_ms": data.viiv.hrv_ms,
+                "stress_score": data.viiv.stress_score,
+                "energy_pct": data.viiv.energy_pct,
+                "sleep_score": data.viiv.sleep_score,
+                "recovery_pct": data.viiv.recovery_pct,
+                "strain": data.viiv.strain,
             }
-        except Exception as e:
-            print(f"Erreur XGBoost reel, bascule automatique vers simulation: {e}")
 
-    # Mode Simulation robuste de secours
-    base_risk = 0.05
-    if data.ACWR > 1.5: base_risk += 0.4
-    if data.douleurMusculaire > 7: base_risk += 0.3
-    if data.fatigue > 7: base_risk += 0.2
-    
-    risk_score = min(max(base_risk + random.uniform(-0.05, 0.05), 0.0), 0.99)
-    level = "Critique" if risk_score > 0.7 else ("Modéré" if risk_score > 0.4 else "Faible")
-    
-    factors = [
-        {"feature": "ACWR", "contribution": 0.25 if data.ACWR > 1.3 else -0.1, "impact": "négatif" if data.ACWR > 1.3 else "positif"},
-        {"feature": "Douleur Musculaire", "contribution": 0.15 if data.douleurMusculaire > 5 else -0.15, "impact": "négatif" if data.douleurMusculaire > 5 else "positif"},
-        {"feature": "Fatigue", "contribution": 0.1 if data.fatigue > 5 else -0.1, "impact": "négatif" if data.fatigue > 5 else "positif"},
-        {"feature": "Sommeil", "contribution": -0.2 if data.sommeil > 7 else 0.15, "impact": "positif" if data.sommeil > 7 else "négatif"}
-    ]
-    
-    return {
-        "playerId": data.playerId,
-        "riskScore": round(risk_score, 2),
-        "riskLevel": level,
-        "factors": factors
-    }
+        return {
+            "playerId": data.playerId,
+            "riskScore": round(risk_prob, 2),
+            "riskLevel": risk_level,
+            "factors": factors,
+            "resolved_inputs": resolved,
+            "viiv_data": viiv_snapshot,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/predict-injury-zone")
+
+@app.post(
+    "/predict-injury-zone",
+    tags=["Injury Zone"],
+    summary="Predict anatomical injury zone (Random Forest / LightGBM)",
+    response_model=InjuryZoneResponse,
+    response_description="Per-zone probability distribution across all anatomical zones",
+    responses={
+        200: {"description": "Prediction successful"},
+        500: {"description": "Model not loaded or prediction error"},
+    },
+)
 def predict_injury_zone(data: ZonePredictionInput):
-    # Mode Réel si disponible
-    if model_zone_artifact:
-        try:
-            model_zone = model_zone_artifact.get('model')
-            pos_encoder = model_zone_artifact.get('pos_mapping')
-            foot_encoder = model_zone_artifact.get('foot_mapping')
-            features = model_zone_artifact.get('feature_names', model_zone_artifact.get('features', []))
-            zones = model_zone_artifact.get('model_classes', model_zone_artifact.get('target_classes', []))
-            
-            pos_enc = pos_encoder.transform([data.position])[0] if pos_encoder and data.position in pos_encoder.classes_ else 0
-            foot_enc = foot_encoder.transform([data.foot])[0] if foot_encoder and data.foot in foot_encoder.classes_ else 0
-                
-            input_dict = {
-                'Age': data.age, 'FIFA rating': data.fifa_rating, 'acuteLoad': data.acuteLoad,
-                'chronicLoad': data.chronicLoad, 'ACWR': data.ACWR, 'douleurMusculaire': data.douleurMusculaire,
-                'souplesse': data.souplesse, 'agilite': data.agilite, 'Position_encoded': pos_enc, 'Foot_encoded': foot_enc
-            }
-            
-            final_input = {feat: input_dict.get(feat, 0) for feat in features}
-            input_df = pd.DataFrame([final_input])[features] 
-            probabilities = model_zone.predict_proba(input_df)[0]
-            predictions = {zones[i]: float(probabilities[i]) for i in range(len(zones))}
-            return {"playerId": data.playerId, "predictions": predictions}
-        except Exception as e:
-            print(f"Erreur zone reelle, bascule automatique vers simulation: {e}")
+    """
+    Classifies which **anatomical zone** is most at risk of injury for a given player.
 
-    # Mode Simulation robuste de secours
-    zones = ["DOS", "CUISSE", "MOLLET", "GENOU", "CHEVILLE", "EPAULE", "BRAS", "TETE", "MAIN"]
-    raw_probs = [random.uniform(0.05, 0.2) for _ in zones]
-    if data.douleurMusculaire > 6:
-        raw_probs[1] += 0.4  # Cuisse
-        raw_probs[3] += 0.2  # Genou
-    if data.agilite < 5:
-        raw_probs[4] += 0.3  # Cheville
+    ### Inputs
+    - **Player profile**: `age`, `position`, `foot`, `fifa_rating`
+    - **Load metrics**: `acuteLoad`, `chronicLoad`, `ACWR`
+    - **Physical tests**: `souplesse`, `agilite`, `douleurMusculaire`
+    - **Viiv GX17**: HRV is used to adjust `douleurMusculaire` via a weighted average.
+
+    ### Output
+    A dictionary mapping each anatomical zone to its predicted probability.
+    The probabilities sum to 1.0 across all zones.
+
+    > **Example zones**: Genou, Ischio-jambiers, Cheville, Adducteur, Lombaire …
+    """
+    if not model_zone_artifact:
+        raise HTTPException(status_code=500, detail="Le modèle des zones est introuvable.")
+    try:
+        model_zone = model_zone_artifact.get('model')
+        pos_encoder, foot_encoder = model_zone_artifact.get('pos_mapping'), model_zone_artifact.get('foot_mapping')
+        features = model_zone_artifact.get('feature_names', model_zone_artifact.get('features', []))
+        zones = model_zone_artifact.get('model_classes', model_zone_artifact.get('target_classes', []))
         
-    sum_probs = sum(raw_probs)
-    normalized_probs = [p / sum_probs for p in raw_probs]
-    predictions = {zones[i]: normalized_probs[i] for i in range(len(zones))}
-    
-    return {"playerId": data.playerId, "predictions": predictions}
+        pos_enc = pos_encoder.transform([data.position])[0] if pos_encoder and data.position in pos_encoder.classes_ else 0
+        foot_enc = foot_encoder.transform([data.foot])[0] if foot_encoder and data.foot in foot_encoder.classes_ else 0
 
-@app.post("/predict-relapse")
-def predict_relapse(data: RelapseSurvivalInput):
-    # Mode Réel si disponible
-    if model_survival_artifact:
-        try:
-            model_surv = model_survival_artifact['model']
-            scaler_surv = model_survival_artifact['scaler']
-            features_surv = model_survival_artifact['features']
-            
-            input_dict = {
-                'recovery_score': data.recovery_score, 'sleep_quality': data.sleep_quality,
-                'stress_level': data.stress_level, 'fatigue_index': data.fatigue_index,
-                'physio_adherence': data.physio_adherence, 'post_recovery_ACWR': data.post_recovery_ACWR
-            }
-            
-            input_df = pd.DataFrame([input_dict])[features_surv]
-            input_scaled = pd.DataFrame(scaler_surv.transform(input_df), columns=features_surv)
-            surv_func = model_surv.predict_survival_function(input_scaled)
-            
-            timeline = surv_func.index.tolist()
-            probabilities = surv_func.iloc[:, 0].tolist()
-            curve = [{"day": int(t), "probability": float(p)} for t, p in zip(timeline, probabilities)]
-            
-            return {
-                "playerId": data.playerId,
-                "c_index": model_survival_artifact.get('c_index', 0.965),
-                "survival_curve": curve
-            }
-        except Exception as e:
-            print(f"Erreur survie reelle, bascule vers simulation: {e}")
+        # Si Viiv disponible, enrichir douleurMusculaire depuis HRV
+        douleur_final = data.douleurMusculaire
+        if data.viiv:
+            viiv_fatigue = data.viiv.derive_fatigue()
+            if viiv_fatigue is not None:
+                douleur_final = (douleur_final + viiv_fatigue) / 2.0  # moyenne pondérée
 
-    # Mode Simulation robuste de secours
-    curve = []
-    risk_factor = (data.post_recovery_ACWR - 1.1) * 0.4 + (100 - data.physio_adherence) * 0.015 + (100 - data.recovery_score) * 0.005
-    risk_factor = max(0.01, risk_factor)
-
-    current_surv = 1.0
-    for day in range(0, 181, 5):
-        current_surv -= random.uniform(0.0, 0.02) * risk_factor * (day/10 + 1)
-        current_surv = max(0.05, min(1.0, current_surv))
-        curve.append({"day": day, "probability": current_surv})
+        input_dict = {
+            'Age': data.age, 'FIFA rating': data.fifa_rating, 'acuteLoad': data.acuteLoad,
+            'chronicLoad': data.chronicLoad, 'ACWR': data.ACWR, 'douleurMusculaire': douleur_final,
+            'souplesse': data.souplesse, 'agilite': data.agilite, 'Position_encoded': pos_enc, 'Foot_encoded': foot_enc
+        }
         
-    return {
-        "playerId": data.playerId,
-        "c_index": 0.968,
-        "survival_curve": curve
-    }
+        final_input = {feat: input_dict.get(feat, 0) for feat in features}
+        input_df = pd.DataFrame([final_input])[features] 
+        probabilities = model_zone.predict_proba(input_df)[0]
+        predictions = {zones[i]: float(probabilities[i]) for i in range(len(zones))}
+        return {"playerId": data.playerId, "predictions": predictions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# =========================================================
-# ENDPOINTS LLM GENERATIFS (M4)
-# =========================================================
 
-@app.post("/generate-match-analysis")
-def generate_match_analysis(data: MatchAnalysisInput):
-    events_str = "\n".join([f"- Min {e.minute} : {e.type} par {e.player} ({e.detail})" for e in data.events])
-    
-    prompt = f"""
-    Analyse tactique requise pour le match contre {data.opponent}.
-    Résultat : {data.goalsFor} - {data.goalsAgainst} ({data.result}).
-    Schéma : {data.formation}.
-    Philosophie tactique de notre club : {data.clubPhilosophy}.
-    
-    Indicateurs tactiques collectifs :
-    - Possession : {data.teamAnalytics.possession}%
-    - Précision passes : {data.teamAnalytics.passAccuracy}%
-    - Précision tirs : {data.teamAnalytics.shotAccuracy}%
-    - Index de pression : {data.teamAnalytics.pressureIndex}/100
-    - Expected Goals (xG) : {data.teamAnalytics.xg} | xGA : {data.teamAnalytics.xga}
-    - PPDA : {data.teamAnalytics.ppda} | Field Tilt : {data.teamAnalytics.fieldTilt}%
-    
-    Notes tactiques du staff : {data.tacticalNotes or 'Aucune'}
-    
-    Timeline des moments marquants :
-    {events_str}
-    
-    IMPORTANT: Ta réponse doit être un JSON avec ces champs: global_summary, tactical_framework (avec possession_phase, transition_phase, defensive_phase contenant chacun assessment et metric_correlation), key_moments_breakdown (liste avec minute, event_type, player_involved, tactical_impact), immediate_directives (liste de 3 directives).
+@app.post(
+    "/predict-relapse",
+    tags=["Relapse Survival"],
+    summary="Predict relapse survival curve (Cox Proportional Hazards)",
+    response_model=RelapseSurvivalResponse,
+    response_description="Survival curve (day-by-day probability of remaining injury-free) and model concordance index",
+    responses={
+        200: {"description": "Prediction successful"},
+        500: {"description": "Model not loaded or prediction error"},
+    },
+)
+def predict_relapse_risk(data: RelapseSurvivalInput):
     """
-    
-    system_instruction = f"""
-    Tu es l'Analyste Tactique principal d'un club de football élite. 
-    Rédige un rapport technique complet en Français. Évalue la performance collective par rapport à notre philosophie de jeu : {data.clubPhilosophy}.
-    Tu dois impérativement répondre en JSON valide.
-    """
-    
-    return call_openai_structured(prompt, system_instruction, StructuredMatchReport)
+    Estimates the **relapse survival curve** for a player returning from injury
+    using a Cox Proportional Hazards model.
 
-@app.post("/generate-player-insight")
-def generate_player_insight(data: PlayerPerformanceInput):
-    prompt = f"""
-    Évalue la performance de {data.playerName} au poste de {data.position} lors de ce match.
-    Statistiques individuelles récoltées :
-    - Note attribuée : {data.rating}/10
-    - Buts : {data.goals} | Passes Décisives : {data.assists}
-    - Volume physique : {data.distanceCovered} km parcourus | {data.sprintCount} sprints à haute intensité
-    - Précision technique : {data.passAccuracy}% de passes réussies
-    - Activité globale : {data.touchCount} ballons touchés
-    
-    IMPORTANT: Réponds en JSON avec ces champs: tactical_impact, physical_assessment, technical_flaw, targeted_drill.
-    """
-    
-    system_instruction = """
-    Tu es le Responsable du Développement Individuel des Joueurs.
-    Rédige un bilan individuel de performance en Français. Sois constructif, exigeant et précis.
-    Donne un exercice d'entraînement concret pour pallier sa faille identifiée.
-    Tu dois impérativement répondre en JSON valide.
-    """
-    
-    return call_openai_structured(prompt, system_instruction, StructuredPlayerInsight)
+    ### What is a survival curve?
+    The curve gives, for each day after return-to-play, the probability that the
+    player has *not* suffered a relapse injury. A steep drop in the early days
+    signals high relapse risk.
 
-@app.post("/generate-tactical-suggestion")
-def generate_tactical_suggestion(data: MatchAnalysisInput):
-    prompt = f"""
-    Déficits constatés face à {data.opponent} (Score: {data.goalsFor}-{data.goalsAgainst}).
-    Tactique utilisée : {data.formation} ({data.clubPhilosophy}).
-    Indicateurs de faiblesse :
-    - xG : {data.teamAnalytics.xg} vs xGA : {data.teamAnalytics.xga}
-    - PPDA (Qualité du pressing) : {data.teamAnalytics.ppda}
-    - Compacité défensive observée : {data.tacticalAnalysis.defensiveCompactness}
-    
-    IMPORTANT: Réponds en JSON avec ces champs: vulnerability_identified, statistical_proof, tactical_fix, expected_outcome.
-    """
-    
-    system_instruction = """
-    Tu es le Directeur Sportif et Consultant Tactique Principal.
-    Identifie la faille tactique majeure du match et propose un correctif précis et directement actionnable par l'entraîneur lors du prochain cycle.
-    Tu dois impérativement répondre en JSON valide.
-    """
-    
-    return call_openai_structured(prompt, system_instruction, StructuredTacticalSuggestion)
+    ### Input Resolution (Viiv GX17)
+    The request payload should contain Viiv data plus the supplementary rehabilitation
+    fields required by the model.
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="localhost", port=8000)
+    | Viiv field | → | Model feature |
+    |---|---|---|
+    | `recovery_pct` | → | `recovery_score` |
+    | `sleep_score` | → | `sleep_quality` |
+    | `stress_score` | → | `stress_level` (0–1) |
+    | `hrv_ms` | → | `fatigue_index` (0–100) |
+
+    ### Model Quality
+    The `c_index` (concordance index) measures how well the model ranks players
+    by actual relapse time. A value of **0.96** means near-perfect discrimination.
+    """
+    if not model_survival_artifact:
+        raise HTTPException(status_code=500, detail="Le modèle de Survie (Cox) est introuvable.")
+    
+    try:
+        model_surv = model_survival_artifact['model']
+        scaler_surv = model_survival_artifact['scaler']
+        features_surv = model_survival_artifact['features']
+        
+        resolved = data.resolve_inputs()
+
+        input_df = pd.DataFrame([resolved])[features_surv]
+        input_scaled = pd.DataFrame(scaler_surv.transform(input_df), columns=features_surv)
+        
+        surv_func = model_surv.predict_survival_function(input_scaled)
+        
+        timeline = surv_func.index.tolist()
+        probabilities = surv_func.iloc[:, 0].tolist()
+        
+        curve = [{"day": int(t), "probability": float(p)} for t, p in zip(timeline, probabilities)]
+        
+        viiv_snapshot = None
+        if data.viiv:
+            viiv_snapshot = {
+                "heart_rate": data.viiv.heart_rate,
+                "spo2": data.viiv.spo2,
+                "hrv_ms": data.viiv.hrv_ms,
+                "recovery_pct": data.viiv.recovery_pct,
+                "stress_score": data.viiv.stress_score,
+                "energy_pct": data.viiv.energy_pct,
+            }
+
+        return {
+            "playerId": data.playerId,
+            "c_index": model_survival_artifact.get('c_index', 0.96),
+            "survival_curve": curve,
+            "resolved_inputs": resolved,
+            "viiv_data": viiv_snapshot,
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur de prédiction Survie: {str(e)}")
