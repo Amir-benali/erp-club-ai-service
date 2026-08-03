@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
+import os
 import re
 
 import numpy as np
@@ -23,6 +24,14 @@ except Exception as exc:  # pragma: no cover
     EASYOCR_IMPORT_ERROR = str(exc)
 else:
     EASYOCR_IMPORT_ERROR = None
+
+try:
+    import pytesseract
+except Exception as exc:  # pragma: no cover
+    pytesseract = None
+    TESSERACT_IMPORT_ERROR = str(exc)
+else:
+    TESSERACT_IMPORT_ERROR = None
 
 
 NUTRIENT_ALIASES: Dict[str, List[str]] = {
@@ -107,12 +116,33 @@ def run_easyocr_on_image_bytes(image_bytes: bytes) -> str:
     image = ImageEnhance.Contrast(image).enhance(1.5)
     # Avoid turning high-resolution scans into images too large for the OCR
     # detector. Small phone images are enlarged; large PDF renders are capped.
-    scale = min(2.0, 5000.0 / max(image.width, image.height))
+    # Cloud containers can be memory-constrained. A 2,800 px edge provides
+    # readable medical tables without allocating hundreds of MB in ONNX/OpenCV.
+    max_dimension = int(os.getenv("OCR_MAX_DIMENSION", "2800"))
+    scale = min(2.0, max_dimension / max(image.width, image.height))
     if scale != 1.0:
         image = image.resize(
             (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
             Image.Resampling.LANCZOS,
         )
+
+    # Tesseract has a far smaller memory footprint than ONNX Runtime. It is
+    # selected by the production Docker image for constrained Railway plans.
+    backend = os.getenv("OCR_BACKEND", "rapidocr").strip().lower()
+    if backend == "tesseract" and pytesseract is not None:
+        try:
+            text = pytesseract.image_to_string(
+                image,
+                lang="fra+eng",
+                config="--oem 1 --psm 11",
+            )
+            # Do not initialize ONNX as a fallback in a constrained cloud
+            # container: it is precisely the allocation that can terminate
+            # the service. An empty result becomes a normal API 400 response.
+            return text.strip()
+        except Exception as exc:
+            raise RuntimeError(f"Tesseract OCR failed: {exc}") from exc
+
     np_image = np.array(image)
 
     rapid_reader = get_rapidocr_reader()
@@ -132,7 +162,8 @@ def run_easyocr_on_image_bytes(image_bytes: bytes) -> str:
     raise RuntimeError(
         "No OCR backend is available. "
         f"RapidOCR import error: {RAPIDOCR_IMPORT_ERROR or 'not installed'}; "
-        f"EasyOCR import error: {EASYOCR_IMPORT_ERROR or 'not installed'}."
+        f"EasyOCR import error: {EASYOCR_IMPORT_ERROR or 'not installed'}; "
+        f"Tesseract import error: {TESSERACT_IMPORT_ERROR or 'not installed'}."
     )
 
 
@@ -155,7 +186,7 @@ def _merge_unique_lines(*text_sources: str) -> str:
 def _render_pdf_page_for_ocr(page: Any, file_bytes: bytes, page_index: int) -> bytes:
     """Render one PDF page to PNG with pdfplumber, then pypdfium2 as fallback."""
     try:
-        preview = page.to_image(resolution=300)
+        preview = page.to_image(resolution=220)
         image_buffer = BytesIO()
         preview.original.save(image_buffer, format="PNG")
         return image_buffer.getvalue()
@@ -166,7 +197,7 @@ def _render_pdf_page_for_ocr(page: Any, file_bytes: bytes, page_index: int) -> b
 
         pdf_document = pdfium.PdfDocument(file_bytes)
         pdf_page = pdf_document[page_index]
-        bitmap = pdf_page.render(scale=300 / 72)
+        bitmap = pdf_page.render(scale=220 / 72)
         image_buffer = BytesIO()
         bitmap.to_pil().save(image_buffer, format="PNG")
         return image_buffer.getvalue()

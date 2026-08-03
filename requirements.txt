@@ -18,3 +18,4 @@ Pillow
 python-multipart
 python-docx
 pdfplumber
+pytesseract==0.3.13
