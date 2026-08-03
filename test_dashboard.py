@@ -246,7 +246,8 @@ page = st.sidebar.radio(
     [
         "🩺 M1 - Risque de Blessure (Global)", 
         "🗺️ M2 - Cartographie (Zones)", 
-        "⏳ M3 - Analyse de Survie (Rechute)"
+        "⏳ M3 - Analyse de Survie (Rechute)",
+        "🧾 M4 - OCR Rapport Medical"
     ]
 )
 st.sidebar.markdown("---")
@@ -292,6 +293,7 @@ st.sidebar.caption("ERP Club AI v5.0 — Intégration Viiv GX17")
 API_URL_GLOBAL = "http://localhost:8000/predict-injury"
 API_URL_ZONE = "http://localhost:8000/predict-injury-zone"
 API_URL_RELAPSE = "http://localhost:8000/predict-relapse"
+API_URL_MEDICAL_OCR = "http://localhost:8000/extract-medical-nutrients"
 
 
 # ==========================================
@@ -755,3 +757,112 @@ elif page == "⏳ M3 - Analyse de Survie (Rechute)":
             st.info("👈 Ajustez les paramètres post-rééducation du patient (Adhérence et ACWR sont primordiaux) et lancez le modèle pour simuler son risque temporel de rechute.")
             
         st.markdown('</div>', unsafe_allow_html=True)
+
+# ==========================================
+# PAGE 4 : OCR RAPPORT MEDICAL (Vitamines/Mineraux)
+# ==========================================
+elif page == "🧾 M4 - OCR Rapport Medical":
+    st.markdown('''
+    <div class="header-container" style="background: linear-gradient(135deg, #0b3b2e 0%, #125a4a 100%);">
+        <div class="logo-box">🧾</div>
+        <div>
+            <h1>OCR des Rapports Medicaux</h1>
+            <p>Extraction automatique des vitamines et mineraux utiles a l'analyse de risque</p>
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
+
+    st.markdown('<div class="dashboard-card"><div class="card-title">📥 Import du rapport</div>', unsafe_allow_html=True)
+
+    uploaded_file = st.file_uploader(
+        "Importer un rapport medical (image / pdf / docx)",
+        type=["png", "jpg", "jpeg", "pdf", "docx"],
+        help="Formats supportes: PNG, JPG, JPEG, PDF, DOCX.",
+    )
+
+    example_report = (
+        "Patient: John Doe\n"
+        "Date: 2026-07-20\n"
+        "Vitamin D (25-OH D): 18 ng/mL\n"
+        "Vitamin B12: 265 pg/mL\n"
+        "Zinc: 62 ug/dL\n"
+        "Magnesium serum: 1.5 mg/dL\n"
+        "Ferritin: 410 ng/mL\n"
+        "Clinical note: low energy and recurrent muscle fatigue.\n"
+    )
+
+    raw_text = st.text_area(
+        "Ou coller le texte du rapport (exemple pre-rempli)",
+        value=example_report,
+        height=220,
+    )
+
+    analyze = st.button("🔍 Extraire Vitamines / Mineraux", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="dashboard-card"><div class="card-title">🧠 Resultat d\'analyse</div>', unsafe_allow_html=True)
+
+    if analyze:
+        files = None
+        use_ocr_flag = "true"
+        if uploaded_file is not None:
+            fname = uploaded_file.name or "uploaded"
+            ext = fname.rsplit('.', 1)[-1].lower() if "." in fname else ""
+            # For document formats we prefer native text extraction (pdf/docx)
+            if ext in ("pdf", "doc", "docx"):
+                use_ocr_flag = "false"
+            files = {
+                "file": (
+                    fname,
+                    uploaded_file.getvalue(),
+                    uploaded_file.type or "application/octet-stream",
+                )
+            }
+
+        form_data = {
+            "raw_text": raw_text,
+            "use_ocr": use_ocr_flag,
+        }
+
+        with st.spinner("Lecture OCR + extraction des micronutriments en cours..."):
+            try:
+                res = requests.post(API_URL_MEDICAL_OCR, files=files, data=form_data)
+                if res.status_code == 200:
+                    payload = res.json()
+                    nutrients_found = payload.get("nutrients_found", [])
+                    mentions = payload.get("mentions", [])
+                    flagged = payload.get("flagged", [])
+
+                    st.success(f"Extraction terminee. Nutriments detectes: {len(nutrients_found)}")
+
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Nutriments detectes", len(nutrients_found))
+                    c2.metric("Mentions extraites", len(mentions))
+                    c3.metric("Anomalies (low/high)", len(flagged))
+
+                    if nutrients_found:
+                        st.markdown("**Nutriments detectes:** " + ", ".join(nutrients_found))
+
+                    if mentions:
+                        df_mentions = pd.DataFrame(mentions)
+                        st.dataframe(df_mentions, use_container_width=True)
+                    else:
+                        st.info("Aucune mention nutriment/valeur detectee dans le texte fourni.")
+
+                    if flagged:
+                        st.markdown("### ⚠️ Micronutriments potentiellement a risque")
+                        for item in flagged:
+                            st.warning(
+                                f"{item['nutrient']} = {item.get('value')} {item.get('unit') or ''} ({item['status']})"
+                            )
+
+                    with st.expander("Voir le texte analyse"):
+                        st.text(payload.get("extracted_text", ""))
+                else:
+                    st.error(f"Erreur API ({res.status_code}): {res.text}")
+            except Exception as e:
+                st.error(f"Impossible de contacter FastAPI sur le port 8000. Détails: {e}")
+    else:
+        st.info("Importez une image medicale ou utilisez l'exemple texte, puis lancez l'extraction.")
+
+    st.markdown('</div>', unsafe_allow_html=True)

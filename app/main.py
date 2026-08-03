@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
@@ -6,6 +6,12 @@ import pandas as pd
 import joblib
 import shap
 import os
+
+from app.medical_ocr import (
+    extract_nutrients_from_text,
+    extract_text_from_file,
+    run_easyocr_on_image_bytes,
+)
 
 # ---------------------------------------------------------
 # OpenAPI / Swagger Metadata
@@ -38,6 +44,13 @@ tags_metadata = [
             "**Module 3 — Relapse Survival Analysis (Cox Proportional Hazards).** "
             "Estimates the survival curve (probability of staying injury-free over time) "
             "for a player returning from injury."
+        ),
+    },
+    {
+        "name": "Medical OCR",
+        "description": (
+            "Extracts vitamins and minerals (zinc, magnesium, etc.) from medical reports "
+            "using OCR + rule-based parsing for downstream model awareness."
         ),
     },
 ]
@@ -504,6 +517,23 @@ class RelapseSurvivalResponse(BaseModel):
     }
 
 
+class MedicalNutrientMention(BaseModel):
+    nutrient: str
+    matched_alias: str
+    value: Optional[float] = None
+    unit: Optional[str] = None
+    status: str
+    text_snippet: str
+
+
+class MedicalNutrientExtractionResponse(BaseModel):
+    source: str = Field(..., description="Input source: image, text, or image+text")
+    extracted_text: str = Field(..., description="OCR and/or provided text merged for parsing")
+    nutrients_found: List[str] = Field(..., description="Detected nutrient names")
+    mentions: List[MedicalNutrientMention] = Field(..., description="Detected nutrient/value mentions")
+    flagged: List[MedicalNutrientMention] = Field(..., description="Only low/high out-of-range mentions")
+
+
 # ---------------------------------------------------------
 # 5. ROUTES DE L'API
 # ---------------------------------------------------------
@@ -742,3 +772,70 @@ def predict_relapse_risk(data: RelapseSurvivalInput):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur de prédiction Survie: {str(e)}")
+
+
+@app.post(
+    "/extract-medical-nutrients",
+    tags=["Medical OCR"],
+    summary="Extract vitamins/minerals from a medical report",
+    response_model=MedicalNutrientExtractionResponse,
+    response_description="Detected nutrient mentions and abnormal findings",
+)
+async def extract_medical_nutrients(
+    file: Optional[UploadFile] = File(default=None),
+    raw_text: Optional[str] = Form(default=None),
+    use_ocr: bool = Form(default=True),
+):
+    """
+    Accepts:
+    - a PDF, DOCX, or image report (`file`) for text extraction / OCR,
+    - plain text report (`raw_text`),
+    - or both (merged before parsing).
+
+    Extracts vitamins and minerals that can influence risk modeling, such as
+    vitamin D, B12, zinc, magnesium, ferritin, and calcium.
+    """
+    if file is None and not (raw_text and raw_text.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least one input: file (PDF/DOCX/image) or raw_text.",
+        )
+
+    extracted_chunks: List[str] = []
+    source = "text"
+
+    if file is not None:
+        filename = file.filename or "unknown"
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext in ("pdf", "docx", "doc"):
+            source = "document"
+        else:
+            source = "image"
+
+        try:
+            file_bytes = await file.read()
+            if use_ocr or ext in ("pdf", "docx", "doc"):
+                parsed_text = extract_text_from_file(file_bytes, filename)
+                if parsed_text.strip():
+                    extracted_chunks.append(parsed_text)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"File parsing failed: {str(e)}")
+
+    if raw_text and raw_text.strip():
+        source = f"{source}+text" if source != "text" else "text"
+        extracted_chunks.append(raw_text.strip())
+
+    merged_text = "\n\n".join(extracted_chunks).strip()
+    if not merged_text:
+        raise HTTPException(status_code=400, detail="No readable text found in input.")
+
+    extracted = extract_nutrients_from_text(merged_text)
+    return {
+        "source": source,
+        "extracted_text": merged_text,
+        "nutrients_found": extracted["nutrients_found"],
+        "mentions": extracted["mentions"],
+        "flagged": extracted["flagged"],
+    }

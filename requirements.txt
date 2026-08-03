@@ -11,3 +11,10 @@ matplotlib
 python-dotenv
 openai
 lifelines
+streamlit
+plotly
+rapidocr-onnxruntime
+Pillow
+python-multipart
+python-docx
+pdfplumber
