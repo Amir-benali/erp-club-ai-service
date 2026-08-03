@@ -10,13 +10,19 @@ from PIL import Image, ImageEnhance, ImageOps
 
 try:
     from rapidocr_onnxruntime import RapidOCR
-except Exception:  # pragma: no cover
+except Exception as exc:  # pragma: no cover
     RapidOCR = None
+    RAPIDOCR_IMPORT_ERROR = str(exc)
+else:
+    RAPIDOCR_IMPORT_ERROR = None
 
 try:
     import easyocr
-except Exception:  # pragma: no cover
+except Exception as exc:  # pragma: no cover
     easyocr = None
+    EASYOCR_IMPORT_ERROR = str(exc)
+else:
+    EASYOCR_IMPORT_ERROR = None
 
 
 NUTRIENT_ALIASES: Dict[str, List[str]] = {
@@ -124,7 +130,9 @@ def run_easyocr_on_image_bytes(image_bytes: bytes) -> str:
         return "\n".join([str(line).strip() for line in lines if str(line).strip()])
 
     raise RuntimeError(
-        "No OCR backend installed. Install rapidocr-onnxruntime (recommended) or easyocr."
+        "No OCR backend is available. "
+        f"RapidOCR import error: {RAPIDOCR_IMPORT_ERROR or 'not installed'}; "
+        f"EasyOCR import error: {EASYOCR_IMPORT_ERROR or 'not installed'}."
     )
 
 

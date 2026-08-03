@@ -13,7 +13,7 @@ openai
 lifelines
 streamlit
 plotly
-rapidocr-onnxruntime
+rapidocr-onnxruntime==1.2.3
 Pillow
 python-multipart
 python-docx
