@@ -234,6 +234,36 @@ st.markdown("""
 # ==========================================
 if "viiv_data" not in st.session_state:
     st.session_state.viiv_data = None  # Aucune donnée Viiv encore chargée
+if "medical_nutrition" not in st.session_state:
+    st.session_state.medical_nutrition = None
+
+NUTRITION_DEFAULTS = {
+    "vitamin_d": 24.0, "vitamin_b12": 512.0, "folate": 8.0,
+    "vitamin_c": 0.0, "vitamin_a": 0.0, "vitamin_e": 0.0,
+    "zinc": 82.0, "magnesium": 1.8, "iron": 0.0, "ferritin": 85.0,
+    "calcium": 9.1, "hemoglobin": 14.2, "c_reactive_protein": 0.32,
+    "fasting_glucose": 0.96, "total_cholesterol": 2.15,
+    "ldl_cholesterol": 1.45, "hdl_cholesterol": 0.48, "triglycerides": 1.30,
+}
+GLOBAL_NUTRITION_FIELDS = {
+    "vitamin_d", "ferritin", "hemoglobin", "vitamin_b12", "magnesium",
+    "zinc", "iron", "c_reactive_protein",
+}
+ZONE_NUTRITION_FIELDS = {
+    "vitamin_d", "ferritin", "hemoglobin", "magnesium", "calcium",
+    "c_reactive_protein",
+}
+RELAPSE_NUTRITION_FIELDS = {
+    "vitamin_d", "ferritin", "hemoglobin", "vitamin_b12", "magnesium",
+    "iron", "c_reactive_protein",
+}
+
+def nutrition_for_model(nutrition, allowed_fields):
+    """Send only OCR values relevant to the target model."""
+    if not nutrition:
+        return None
+    selected = {key: value for key, value in nutrition.items() if key in allowed_fields}
+    return selected or None
 
 
 # ==========================================
@@ -285,6 +315,59 @@ if st.session_state.viiv_data:
     if st.sidebar.button("🗑️ Réinitialiser les données Viiv", use_container_width=True):
         st.session_state.viiv_data = None
         st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🧪 Nutrition / Bilan OCR")
+st.sidebar.caption("Valeurs standardisées extraites d'un rapport médical français. Elles ajustent la préparation dans les 3 modèles.")
+
+with st.sidebar.expander("🧪 Saisir / mettre à jour le bilan OCR", expanded=st.session_state.medical_nutrition is None):
+    nutrition_enabled = st.checkbox(
+        "Utiliser un bilan nutritionnel", value=st.session_state.medical_nutrition is not None,
+        key="nutrition_enabled",
+    )
+    current_nutrition = st.session_state.medical_nutrition or NUTRITION_DEFAULTS
+    if nutrition_enabled:
+        n_col1, n_col2 = st.columns(2)
+        with n_col1:
+            n_vitd = st.number_input("Vitamine D (ng/mL)", value=float(current_nutrition.get("vitamin_d", 0.0)), key="n_vitd")
+            n_b12 = st.number_input("Vitamine B12 (pg/mL)", value=float(current_nutrition.get("vitamin_b12", 0.0)), key="n_b12")
+            n_folate = st.number_input("Folates B9 (ng/mL)", value=float(current_nutrition.get("folate", 0.0)), key="n_folate")
+            n_vitc = st.number_input("Vitamine C (mg/L)", value=float(current_nutrition.get("vitamin_c", 0.0)), key="n_vitc")
+            n_vita = st.number_input("Vitamine A", value=float(current_nutrition.get("vitamin_a", 0.0)), key="n_vita")
+            n_vite = st.number_input("Vitamine E", value=float(current_nutrition.get("vitamin_e", 0.0)), key="n_vite")
+            n_zinc = st.number_input("Zinc (µg/dL)", value=float(current_nutrition.get("zinc", 0.0)), key="n_zinc")
+            n_magnesium = st.number_input("Magnésium (mg/dL)", value=float(current_nutrition.get("magnesium", 0.0)), key="n_magnesium")
+            n_iron = st.number_input("Fer (µg/dL)", value=float(current_nutrition.get("iron", 0.0)), key="n_iron")
+        with n_col2:
+            n_ferritin = st.number_input("Ferritine (ng/mL)", value=float(current_nutrition.get("ferritin", 0.0)), key="n_ferritin")
+            n_calcium = st.number_input("Calcium (mg/dL)", value=float(current_nutrition.get("calcium", 0.0)), key="n_calcium")
+            n_hemoglobin = st.number_input("Hémoglobine (g/dL)", value=float(current_nutrition.get("hemoglobin", 0.0)), key="n_hemoglobin")
+            n_crp = st.number_input("CRP (mg/L)", value=float(current_nutrition.get("c_reactive_protein", 0.0)), key="n_crp")
+            n_glucose = st.number_input("Glycémie à jeun (g/L)", value=float(current_nutrition.get("fasting_glucose", 0.0)), key="n_glucose")
+            n_total_chol = st.number_input("Cholestérol total (g/L)", value=float(current_nutrition.get("total_cholesterol", 0.0)), key="n_total_chol")
+            n_ldl = st.number_input("LDL (g/L)", value=float(current_nutrition.get("ldl_cholesterol", 0.0)), key="n_ldl")
+            n_hdl = st.number_input("HDL (g/L)", value=float(current_nutrition.get("hdl_cholesterol", 0.0)), key="n_hdl")
+            n_triglycerides = st.number_input("Triglycérides (g/L)", value=float(current_nutrition.get("triglycerides", 0.0)), key="n_triglycerides")
+        if st.button("✅ Utiliser ce bilan dans les modèles", use_container_width=True):
+            nutrition_payload = {
+                "vitamin_d": n_vitd, "vitamin_b12": n_b12, "folate": n_folate,
+                "vitamin_c": n_vitc, "vitamin_a": n_vita, "vitamin_e": n_vite,
+                "zinc": n_zinc, "magnesium": n_magnesium, "iron": n_iron,
+                "ferritin": n_ferritin, "calcium": n_calcium, "hemoglobin": n_hemoglobin,
+                "c_reactive_protein": n_crp, "fasting_glucose": n_glucose,
+                "total_cholesterol": n_total_chol, "ldl_cholesterol": n_ldl,
+                "hdl_cholesterol": n_hdl, "triglycerides": n_triglycerides,
+            }
+            # A zero in the form means "not available in this report", not a
+            # clinical zero. Omit it so FastAPI receives only known OCR values.
+            st.session_state.medical_nutrition = {
+                key: value for key, value in nutrition_payload.items() if value > 0
+            }
+            st.success("Bilan OCR chargé pour les prédictions.")
+
+if st.session_state.medical_nutrition and st.sidebar.button("🗑️ Réinitialiser le bilan OCR", use_container_width=True):
+    st.session_state.medical_nutrition = None
+    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.caption("ERP Club AI v5.0 — Intégration Viiv GX17")
@@ -405,9 +488,12 @@ if page == "🩺 M1 - Risque de Blessure (Global)":
 
     # Carte Viiv Live en haut de page
     v = st.session_state.viiv_data
+    nutrition = st.session_state.medical_nutrition
     render_viiv_card(v)
     if not v:
         st.warning("💡 Chargez les données Viiv GX17 dans le panneau de gauche pour activer l'analyse.")
+    if nutrition:
+        st.info("🧪 Bilan nutritionnel OCR actif : les valeurs biologiques ajusteront fatigue, douleur, stress et sommeil.")
 
     default_acute_load = viiv_derive_acute_load(v)
 
@@ -462,6 +548,8 @@ if page == "🩺 M1 - Risque de Blessure (Global)":
                 "stress_7d_mean": stress_7d_mean,
                 "viiv": v,
             }
+            if nutrition:
+                payload["medical_nutrition"] = nutrition_for_model(nutrition, GLOBAL_NUTRITION_FIELDS)
 
             with st.spinner("Analyse des arbres de décision en cours..."):
                 try:
@@ -520,7 +608,10 @@ elif page == "🗺️ M2 - Cartographie (Zones)":
     ''', unsafe_allow_html=True)
 
     v = st.session_state.viiv_data
+    nutrition = st.session_state.medical_nutrition
     render_viiv_card(v)
+    if nutrition:
+        st.info("🧪 Bilan nutritionnel OCR actif : la douleur musculaire est ajustée avant la prédiction de zone.")
 
     with st.sidebar:
         st.markdown("### 📋 Morphologie & Poste")
@@ -563,6 +654,8 @@ elif page == "🗺️ M2 - Cartographie (Zones)":
                 "agilite": agilite_z
             }
             payload_zone["viiv"] = v
+            if nutrition:
+                payload_zone["medical_nutrition"] = nutrition_for_model(nutrition, ZONE_NUTRITION_FIELDS)
 
             with st.spinner("Cartographie des probabilités par zone..."):
                 try:
@@ -654,9 +747,12 @@ elif page == "⏳ M3 - Analyse de Survie (Rechute)":
     ''', unsafe_allow_html=True)
 
     v = st.session_state.viiv_data
+    nutrition = st.session_state.medical_nutrition
     render_viiv_card(v)
     if not v:
         st.warning("💡 Chargez les données Viiv GX17 dans le panneau de gauche pour activer l'analyse.")
+    if nutrition:
+        st.info("🧪 Bilan nutritionnel OCR actif : récupération, fatigue et stress seront ajustés.")
 
     # Valeurs dérivées depuis Viiv pour ce module
     default_recovery = viiv_derive_recovery(v) or 75.0
@@ -691,6 +787,8 @@ elif page == "⏳ M3 - Analyse de Survie (Rechute)":
                 "post_recovery_ACWR": post_acwr,
                 "viiv": v,
             }
+            if nutrition:
+                payload_surv["medical_nutrition"] = nutrition_for_model(nutrition, RELAPSE_NUTRITION_FIELDS)
             
             with st.spinner("Modélisation de la survie temporelle (Kaplan-Meier estimé)..."):
                 try:
@@ -832,6 +930,18 @@ elif page == "🧾 M4 - OCR Rapport Medical":
                     nutrients_found = payload.get("nutrients_found", [])
                     mentions = payload.get("mentions", [])
                     flagged = payload.get("flagged", [])
+
+                    # Sync OCR values into the global nutrition block used by
+                    # all prediction pages, exactly like the Viiv session data.
+                    ocr_nutrition = {
+                        item["nutrient"]: item["value"]
+                        for item in mentions
+                        if item.get("nutrient") in NUTRITION_DEFAULTS
+                        and item.get("value") is not None
+                    }
+                    if ocr_nutrition:
+                        st.session_state.medical_nutrition = ocr_nutrition
+                        st.success("🧪 Bilan OCR synchronisé avec les 3 modèles de prédiction.")
 
                     st.success(f"Extraction terminee. Nutriments detectes: {len(nutrients_found)}")
 

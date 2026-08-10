@@ -68,7 +68,8 @@ app = FastAPI(
         "### Viiv GX17 Sensor Integration\n"
         "Each request body is centered on a `viiv` block containing raw sensor readings "
         "(HR, SpO₂, HRV, Strain, Recovery %, …) plus only the supplementary fields that the "
-        "target model cannot infer from Viiv alone.\n\n"
+        "target model cannot infer from Viiv alone. Each prediction also accepts an optional "
+        "`medical_nutrition` block populated from Medical OCR.\n\n"
         "### Authentication\n"
         "No authentication is required for this internal microservice. "
         "Secure network-level access is enforced at the API gateway."
@@ -252,6 +253,73 @@ class ViivGX17Data(BaseModel):
 # 3. SCHÉMAS DE DONNÉES IA (Pydantic) — avec champs Viiv intégrés
 # ---------------------------------------------------------
 
+class NutritionReadinessBase(BaseModel):
+    """Base helpers for model-specific OCR nutrition blocks."""
+    def snapshot(self) -> Dict[str, float]:
+        return self.model_dump(exclude_none=True)
+
+    def readiness_penalty(self) -> float:
+        """Translate abnormal OCR values into a transparent 0–3 readiness penalty.
+
+        Existing ML artifacts were not trained with raw laboratory columns. The
+        penalty therefore adjusts already-trained fatigue, pain, stress, and
+        recovery inputs instead of silently changing their feature schema.
+        """
+        score = 0.0
+        vitamin_d = getattr(self, "vitamin_d", None)
+        vitamin_b12 = getattr(self, "vitamin_b12", None)
+        zinc = getattr(self, "zinc", None)
+        magnesium = getattr(self, "magnesium", None)
+        iron = getattr(self, "iron", None)
+        ferritin = getattr(self, "ferritin", None)
+        calcium = getattr(self, "calcium", None)
+        hemoglobin = getattr(self, "hemoglobin", None)
+        crp = getattr(self, "c_reactive_protein", None)
+        if vitamin_d is not None and vitamin_d < 30: score += 0.8
+        if vitamin_b12 is not None and vitamin_b12 < 200: score += 0.5
+        if zinc is not None and zinc < 70: score += 0.4
+        if magnesium is not None and magnesium < 1.7: score += 0.4
+        if iron is not None and iron < 50: score += 0.4
+        if ferritin is not None: score += 0.6 if ferritin < 30 else (0.2 if ferritin > 400 else 0.0)
+        if calcium is not None and calcium < 8.6: score += 0.2
+        if hemoglobin is not None and hemoglobin < 13: score += 0.5
+        if crp is not None and crp > 3: score += 0.8
+        return round(min(score, 3.0), 2)
+
+
+class GlobalRiskNutritionData(NutritionReadinessBase):
+    """Nutrition values relevant to fatigue, pain, stress, and sleep."""
+    vitamin_d: Optional[float] = Field(None, description="Vitamine D 25-OH (ng/mL)")
+    ferritin: Optional[float] = Field(None, description="Ferritine (ng/mL)")
+    hemoglobin: Optional[float] = Field(None, description="Hémoglobine (g/dL)")
+    vitamin_b12: Optional[float] = Field(None, description="Vitamine B12 (pg/mL)")
+    magnesium: Optional[float] = Field(None, description="Magnésium (mg/dL)")
+    zinc: Optional[float] = Field(None, description="Zinc (µg/dL)")
+    iron: Optional[float] = Field(None, description="Fer sérique (µg/dL)")
+    c_reactive_protein: Optional[float] = Field(None, description="CRP / CRP ultrasensible (mg/L)")
+
+
+class InjuryZoneNutritionData(NutritionReadinessBase):
+    """Nutrition values relevant to muscle pain, fatigue, and stability."""
+    vitamin_d: Optional[float] = Field(None, description="Vitamine D 25-OH (ng/mL)")
+    ferritin: Optional[float] = Field(None, description="Ferritine (ng/mL)")
+    hemoglobin: Optional[float] = Field(None, description="Hémoglobine (g/dL)")
+    magnesium: Optional[float] = Field(None, description="Magnésium (mg/dL)")
+    calcium: Optional[float] = Field(None, description="Calcium (mg/dL)")
+    c_reactive_protein: Optional[float] = Field(None, description="CRP / CRP ultrasensible (mg/L)")
+
+
+class RelapseNutritionData(NutritionReadinessBase):
+    """Nutrition values relevant to recovery, fatigue, sleep, and stress."""
+    vitamin_d: Optional[float] = Field(None, description="Vitamine D 25-OH (ng/mL)")
+    ferritin: Optional[float] = Field(None, description="Ferritine (ng/mL)")
+    hemoglobin: Optional[float] = Field(None, description="Hémoglobine (g/dL)")
+    vitamin_b12: Optional[float] = Field(None, description="Vitamine B12 (pg/mL)")
+    magnesium: Optional[float] = Field(None, description="Magnésium (mg/dL)")
+    iron: Optional[float] = Field(None, description="Fer sérique (µg/dL)")
+    c_reactive_protein: Optional[float] = Field(None, description="CRP / CRP ultrasensible (mg/L)")
+
+
 class PlayerFeatures(BaseModel):
     playerId: int
 
@@ -259,6 +327,9 @@ class PlayerFeatures(BaseModel):
     viiv: ViivGX17Data = Field(
         ...,
         description="Données brutes du capteur Viiv GX17 transmises par l'app mobile."
+    )
+    medical_nutrition: Optional[GlobalRiskNutritionData] = Field(
+        None, description="Bilan nutritionnel/biologique issu de l'OCR médical."
     )
 
     # --- Champs IA requis hors Viiv ---
@@ -295,6 +366,11 @@ class PlayerFeatures(BaseModel):
                     "recovery_pct": 30.0,
                     "strain": 0.0,
                 },
+                "medical_nutrition": {
+                    "vitamin_d": 24.0, "ferritin": 85.0, "hemoglobin": 14.2,
+                    "vitamin_b12": 512.0, "magnesium": 1.8, "zinc": 82.0,
+                    "iron": 90.0, "c_reactive_protein": 0.32,
+                },
             }
         }
     }
@@ -309,15 +385,16 @@ class PlayerFeatures(BaseModel):
         sommeil_final = v.derive_sommeil()
         stress_final = v.derive_stress()
         fatigue_final = v.derive_fatigue()
+        nutrition_penalty = self.medical_nutrition.readiness_penalty() if self.medical_nutrition else 0.0
         acute_final = v.derive_acute_load(self.acuteLoad) if v.strain is not None else self.acuteLoad
         acwr_final = self.ACWR
 
         return {
             "totalLoad": self.totalLoad,
-            "sommeil": sommeil_final,
-            "fatigue": fatigue_final,
-            "douleurMusculaire": self.douleurMusculaire,
-            "stress": stress_final,
+            "sommeil": round(max(1.0, sommeil_final - (0.15 * nutrition_penalty)), 2),
+            "fatigue": round(min(10.0, fatigue_final + nutrition_penalty), 2),
+            "douleurMusculaire": round(min(10.0, self.douleurMusculaire + (0.5 * nutrition_penalty)), 2),
+            "stress": round(min(10.0, stress_final + (0.25 * nutrition_penalty)), 2),
             "acuteLoad": acute_final,
             "chronicLoad": self.chronicLoad,
             "ACWR": acwr_final,
@@ -325,6 +402,8 @@ class PlayerFeatures(BaseModel):
             "fatigue_7d_mean": self.fatigue_7d_mean,
             "douleurMusculaire_7d_mean": self.douleurMusculaire_7d_mean,
             "stress_7d_mean": self.stress_7d_mean,
+            "nutrition_readiness_penalty": nutrition_penalty,
+            "medical_nutrition": self.medical_nutrition.snapshot() if self.medical_nutrition else None,
         }
 
 FEATURES_ORDER_XGB = [
@@ -351,6 +430,9 @@ class ZonePredictionInput(BaseModel):
         ...,
         description="Données Viiv GX17 brutes transmises par l'app mobile."
     )
+    medical_nutrition: Optional[InjuryZoneNutritionData] = Field(
+        None, description="Bilan nutritionnel/biologique OCR utilisé pour ajuster la douleur musculaire."
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -376,6 +458,10 @@ class ZonePredictionInput(BaseModel):
                     "recovery_pct": 30.0,
                     "strain": 0.0,
                 },
+                "medical_nutrition": {
+                    "vitamin_d": 24.0, "ferritin": 85.0, "hemoglobin": 14.2,
+                    "magnesium": 1.8, "calcium": 9.1, "c_reactive_protein": 0.32,
+                },
             }
         }
     }
@@ -387,6 +473,9 @@ class RelapseSurvivalInput(BaseModel):
     viiv: ViivGX17Data = Field(
         ...,
         description="Données Viiv GX17 transmises par l'app mobile."
+    )
+    medical_nutrition: Optional[RelapseNutritionData] = Field(
+        None, description="Bilan nutritionnel/biologique OCR utilisé pour ajuster récupération et fatigue."
     )
 
     # Champs IA requis hors Viiv
@@ -409,19 +498,27 @@ class RelapseSurvivalInput(BaseModel):
                 },
                 "physio_adherence": 85.0,
                 "post_recovery_ACWR": 1.1,
+                "medical_nutrition": {
+                    "vitamin_d": 24.0, "ferritin": 85.0, "hemoglobin": 14.2,
+                    "vitamin_b12": 512.0, "magnesium": 1.8, "iron": 90.0,
+                    "c_reactive_protein": 0.32,
+                },
             }
         }
     }
 
     def resolve_inputs(self) -> dict:
         v = self.viiv
+        nutrition_penalty = self.medical_nutrition.readiness_penalty() if self.medical_nutrition else 0.0
         return {
-            "recovery_score": v.derive_recovery_score(),
-            "sleep_quality": v.derive_sommeil(),
-            "stress_level": v.derive_stress_level(),
-            "fatigue_index": v.derive_fatigue_index(),
+            "recovery_score": round(max(0.0, v.derive_recovery_score() - (10.0 * nutrition_penalty)), 2),
+            "sleep_quality": round(max(1.0, v.derive_sommeil() - (0.15 * nutrition_penalty)), 2),
+            "stress_level": round(min(1.0, v.derive_stress_level() + (0.03 * nutrition_penalty)), 3),
+            "fatigue_index": round(min(100.0, v.derive_fatigue_index() + (5.0 * nutrition_penalty)), 2),
             "physio_adherence": self.physio_adherence,
             "post_recovery_ACWR": self.post_recovery_ACWR,
+            "nutrition_readiness_penalty": nutrition_penalty,
+            "medical_nutrition": self.medical_nutrition.snapshot() if self.medical_nutrition else None,
         }
 
 
@@ -451,6 +548,7 @@ class InjuryRiskResponse(BaseModel):
     factors: List[ShapFactor] = Field(..., description="SHAP-based contributing factors, sorted by absolute impact")
     resolved_inputs: Dict[str, Any] = Field(..., description="Final feature values used for prediction (after Viiv resolution)")
     viiv_data: Optional[ViivSnapshot] = Field(None, description="Raw Viiv GX17 snapshot used in this request")
+    medical_nutrition: Optional[GlobalRiskNutritionData] = Field(None, description="Nutrition/lab OCR snapshot used in this request")
 
     model_config = {
         "json_schema_extra": {
@@ -464,6 +562,7 @@ class InjuryRiskResponse(BaseModel):
                 ],
                 "resolved_inputs": {"totalLoad": 850.0, "sommeil": 6.5},
                 "viiv_data": {"heart_rate": 97.0, "hrv_ms": 28.0},
+                "medical_nutrition": {"vitamin_d": 24.0, "ferritin": 85.0},
             }
         }
     }
@@ -474,6 +573,8 @@ class InjuryZoneResponse(BaseModel):
         ...,
         description="Probability per anatomical zone (keys = zone names, values = probability 0–1)"
     )
+    resolved_inputs: Dict[str, Any] = Field(..., description="Final model inputs after Viiv and nutrition adjustment")
+    medical_nutrition: Optional[InjuryZoneNutritionData] = Field(None, description="Nutrition/lab OCR snapshot used in this request")
 
     model_config = {
         "json_schema_extra": {
@@ -485,6 +586,8 @@ class InjuryZoneResponse(BaseModel):
                     "Cheville": 0.15,
                     "Adducteur": 0.12,
                 },
+                "resolved_inputs": {"douleurMusculaire": 4.4, "nutrition_readiness_penalty": 0.8},
+                "medical_nutrition": {"vitamin_d": 24.0},
             }
         }
     }
@@ -499,6 +602,7 @@ class RelapseSurvivalResponse(BaseModel):
     survival_curve: List[SurvivalPoint] = Field(..., description="Day-by-day survival probability curve")
     resolved_inputs: Dict[str, Any] = Field(..., description="Final feature values used for prediction")
     viiv_data: Optional[Dict[str, Any]] = Field(None, description="Raw Viiv GX17 snapshot (subset relevant to survival)")
+    medical_nutrition: Optional[RelapseNutritionData] = Field(None, description="Nutrition/lab OCR snapshot used in this request")
 
     model_config = {
         "json_schema_extra": {
@@ -512,6 +616,7 @@ class RelapseSurvivalResponse(BaseModel):
                 ],
                 "resolved_inputs": {"recovery_score": 72.0, "sleep_quality": 7.0},
                 "viiv_data": {"recovery_pct": 72.0, "hrv_ms": 38.0},
+                "medical_nutrition": {"vitamin_d": 24.0, "magnesium": 1.8},
             }
         }
     }
@@ -577,6 +682,8 @@ def predict_injury_risk(data: PlayerFeatures):
       - `sleep_score` → `sommeil`
       - `strain` → `acuteLoad`
     - `ACWR` is auto-calculated as `acuteLoad / chronicLoad` when not provided.
+    - An optional `medical_nutrition` block from OCR applies a documented
+      readiness adjustment to fatigue, pain, stress, and sleep before scoring.
 
     ### Risk Levels
     | Score | Level |
@@ -622,6 +729,7 @@ def predict_injury_risk(data: PlayerFeatures):
                 "recovery_pct": data.viiv.recovery_pct,
                 "strain": data.viiv.strain,
             }
+        nutrition_snapshot = data.medical_nutrition.snapshot() if data.medical_nutrition else None
 
         return {
             "playerId": data.playerId,
@@ -630,6 +738,7 @@ def predict_injury_risk(data: PlayerFeatures):
             "factors": factors,
             "resolved_inputs": resolved,
             "viiv_data": viiv_snapshot,
+            "medical_nutrition": nutrition_snapshot,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -655,6 +764,8 @@ def predict_injury_zone(data: ZonePredictionInput):
     - **Load metrics**: `acuteLoad`, `chronicLoad`, `ACWR`
     - **Physical tests**: `souplesse`, `agilite`, `douleurMusculaire`
     - **Viiv GX17**: HRV is used to adjust `douleurMusculaire` via a weighted average.
+    - **Medical OCR**: abnormal nutrition/lab values apply a readiness adjustment
+      to `douleurMusculaire` before prediction.
 
     ### Output
     A dictionary mapping each anatomical zone to its predicted probability.
@@ -670,8 +781,8 @@ def predict_injury_zone(data: ZonePredictionInput):
         features = model_zone_artifact.get('feature_names', model_zone_artifact.get('features', []))
         zones = model_zone_artifact.get('model_classes', model_zone_artifact.get('target_classes', []))
         
-        pos_enc = pos_encoder.transform([data.position])[0] if pos_encoder and data.position in pos_encoder.classes_ else 0
-        foot_enc = foot_encoder.transform([data.foot])[0] if foot_encoder and data.foot in foot_encoder.classes_ else 0
+        pos_enc = int(pos_encoder.transform([data.position])[0]) if pos_encoder and data.position in pos_encoder.classes_ else 0
+        foot_enc = int(foot_encoder.transform([data.foot])[0]) if foot_encoder and data.foot in foot_encoder.classes_ else 0
 
         # Si Viiv disponible, enrichir douleurMusculaire depuis HRV
         douleur_final = data.douleurMusculaire
@@ -679,6 +790,8 @@ def predict_injury_zone(data: ZonePredictionInput):
             viiv_fatigue = data.viiv.derive_fatigue()
             if viiv_fatigue is not None:
                 douleur_final = (douleur_final + viiv_fatigue) / 2.0  # moyenne pondérée
+        nutrition_penalty = data.medical_nutrition.readiness_penalty() if data.medical_nutrition else 0.0
+        douleur_final = round(min(10.0, douleur_final + (0.6 * nutrition_penalty)), 2)
 
         input_dict = {
             'Age': data.age, 'FIFA rating': data.fifa_rating, 'acuteLoad': data.acuteLoad,
@@ -690,7 +803,15 @@ def predict_injury_zone(data: ZonePredictionInput):
         input_df = pd.DataFrame([final_input])[features] 
         probabilities = model_zone.predict_proba(input_df)[0]
         predictions = {zones[i]: float(probabilities[i]) for i in range(len(zones))}
-        return {"playerId": data.playerId, "predictions": predictions}
+        return {
+            "playerId": data.playerId,
+            "predictions": predictions,
+            "resolved_inputs": {
+                **input_dict,
+                "nutrition_readiness_penalty": nutrition_penalty,
+            },
+            "medical_nutrition": data.medical_nutrition.snapshot() if data.medical_nutrition else None,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -727,6 +848,9 @@ def predict_relapse_risk(data: RelapseSurvivalInput):
     | `stress_score` | → | `stress_level` (0–1) |
     | `hrv_ms` | → | `fatigue_index` (0–100) |
 
+    The optional `medical_nutrition` OCR block reduces recovery and increases
+    fatigue/stress through the same transparent readiness adjustment.
+
     ### Model Quality
     The `c_index` (concordance index) measures how well the model ranks players
     by actual relapse time. A value of **0.96** means near-perfect discrimination.
@@ -761,6 +885,7 @@ def predict_relapse_risk(data: RelapseSurvivalInput):
                 "stress_score": data.viiv.stress_score,
                 "energy_pct": data.viiv.energy_pct,
             }
+        nutrition_snapshot = data.medical_nutrition.snapshot() if data.medical_nutrition else None
 
         return {
             "playerId": data.playerId,
@@ -768,6 +893,7 @@ def predict_relapse_risk(data: RelapseSurvivalInput):
             "survival_curve": curve,
             "resolved_inputs": resolved,
             "viiv_data": viiv_snapshot,
+            "medical_nutrition": nutrition_snapshot,
         }
         
     except Exception as e:
