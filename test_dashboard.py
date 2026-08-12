@@ -277,7 +277,8 @@ page = st.sidebar.radio(
         "🩺 M1 - Risque de Blessure (Global)", 
         "🗺️ M2 - Cartographie (Zones)", 
         "⏳ M3 - Analyse de Survie (Rechute)",
-        "🧾 M4 - OCR Rapport Medical"
+        "🧾 M4 - OCR Rapport Medical",
+        "⚽ M5 - Possession Estimation"
     ]
 )
 st.sidebar.markdown("---")
@@ -976,3 +977,218 @@ elif page == "🧾 M4 - OCR Rapport Medical":
         st.info("Importez une image medicale ou utilisez l'exemple texte, puis lancez l'extraction.")
 
     st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ====================================================================
+# M5 — POSSESSION ESTIMATION
+# ====================================================================
+elif page == "⚽ M5 - Possession Estimation":
+    st.markdown("""
+    <div class="header-container">
+        <div class="logo-box">⚽</div>
+        <div>
+            <h1>M5 — Possession Estimation</h1>
+            <p>AI-powered ball possession analysis from match video footage</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="dashboard-card">', unsafe_allow_html=True)
+    st.markdown('<div class="card-title">📹 Upload Match Video</div>', unsafe_allow_html=True)
+
+    st.info(
+        "Upload a football match broadcast video (MP4, MKV, AVI). "
+        "The AI will detect players, referees, and the ball, then compute Team A vs Team B possession."
+    )
+
+    col_upload, col_cfg = st.columns([2, 1])
+    with col_upload:
+        video_file = st.file_uploader(
+            "📂 Select video file",
+            type=["mp4", "mkv", "avi", "mov"],
+            help="Supports MP4, MKV, AVI, MOV. Videos up to a few minutes work best."
+        )
+
+    with col_cfg:
+        st.markdown("**⚙️ Analysis Settings**")
+        max_frames = st.slider("Max frames to analyze", 50, 1000, 300, 50,
+                               help="Fewer frames = faster. More = better accuracy.")
+        conf_thresh = st.slider("Person detection threshold", 0.10, 0.80, 0.20, 0.05,
+                                help="YOLO confidence threshold for player/referee detection.")
+        ball_thresh = st.slider("Ball detection threshold", 0.05, 0.50, 0.10, 0.05,
+                                help="YOLO confidence threshold for ball detection.")
+        poss_radius = st.slider("Possession radius (px)", 30, 300, 100, 10,
+                                help="Max pixel distance from ball to claim possession.")
+        smooth_win  = st.slider("Smoothing window (frames)", 1, 30, 5, 1,
+                                help="Majority-vote window to smooth possession labels.")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if video_file is not None:
+        st.markdown('<div class="dashboard-card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">🚀 Run Analysis</div>', unsafe_allow_html=True)
+
+        if st.button("⚽ Analyze Possession", use_container_width=True, type="primary"):
+            with st.spinner("🔄 Uploading and processing video — this may take several minutes..."):
+                try:
+                    import requests as _req
+                    files = {"video": (video_file.name, video_file.getvalue(),
+                                       f"video/{video_file.type.split('/')[-1]}")}
+                    data = {
+                        "max_frames":       str(max_frames),
+                        "conf_thresh":      str(conf_thresh),
+                        "ball_conf_thresh": str(ball_thresh),
+                        "poss_radius_px":   str(poss_radius),
+                        "smoothing_window": str(smooth_win),
+                    }
+                    resp = _req.post(
+                        "http://localhost:8000/possession/analyze",
+                        files=files,
+                        data=data,
+                        timeout=600,
+                    )
+
+                    if resp.status_code == 200:
+                        r = resp.json()
+                        st.session_state["possession_result"] = r
+                        st.success("✅ Analysis complete!")
+                    else:
+                        st.error(f"API error ({resp.status_code}): {resp.text}")
+                except Exception as exc:
+                    st.error(f"Could not reach FastAPI at localhost:8000. Details: {exc}")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Results Panel ──
+    if "possession_result" in st.session_state and st.session_state.possession_result:
+        r = st.session_state.possession_result
+
+        st.markdown('<div class="dashboard-card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">📊 Possession Results</div>', unsafe_allow_html=True)
+
+        # KPI Row
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("⚽ Team A Possession",     f"{r.get('team_a_pct', 0):.1f}%")
+        k2.metric("⚽ Team B Possession",     f"{r.get('team_b_pct', 0):.1f}%")
+        k3.metric("🎯 Classifier Accuracy",   f"{r.get('classifier_val_acc', 0)*100:.1f}%")
+        k4.metric("🖼️ Frames Processed",     str(r.get('total_frames_processed', '—')))
+
+        st.markdown("---")
+
+        # Detection breakdown
+        d1, d2, d3 = st.columns(3)
+        d1.metric("👕 Team A players detected", str(r.get('n_team_a', 0)))
+        d2.metric("👕 Team B players detected", str(r.get('n_team_b', 0)))
+        d3.metric("🦺 Referees detected",       str(r.get('n_referee', 0)))
+
+        st.markdown("---")
+
+        # Possession gauge chart
+        pct_a = r.get('team_a_pct', 50.0)
+        pct_b = r.get('team_b_pct', 50.0)
+
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=pct_a,
+            title={"text": "Team A Possession %", "font": {"size": 18}},
+            gauge={
+                "axis": {"range": [0, 100]},
+                "bar":  {"color": "#4f46e5"},
+                "steps": [
+                    {"range": [0, pct_a], "color": "rgba(79,70,229,0.15)"},
+                    {"range": [pct_a, 100], "color": "rgba(239,68,68,0.10)"},
+                ],
+                "threshold": {"line": {"color": "#ef4444", "width": 4}, "value": 50},
+            },
+        ))
+        fig_gauge.update_layout(height=300, margin=dict(t=40, b=20, l=20, r=20),
+                                paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig_gauge, use_container_width=True)
+
+        # Bar chart
+        fig_bar = go.Figure(data=[
+            go.Bar(name="Team A", x=["Team A"], y=[pct_a],
+                   marker_color="#4f46e5", text=[f"{pct_a}%"], textposition="outside"),
+            go.Bar(name="Team B", x=["Team B"], y=[pct_b],
+                   marker_color="#ef4444", text=[f"{pct_b}%"], textposition="outside"),
+        ])
+        fig_bar.update_layout(
+            title="Overall Possession Split",
+            yaxis_range=[0, 110],
+            height=280,
+            showlegend=False,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(t=40, b=20, l=20, r=20),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+        # Per-frame timeline (last 20 rows returned)
+        records = r.get('per_frame_records', [])
+        if records:
+            df_pf = pd.DataFrame(records)
+            fig_line = px.line(
+                df_pf, x="time_sec", y=["team_a_pct", "team_b_pct"],
+                labels={"value": "Possession %", "time_sec": "Time (s)", "variable": "Team"},
+                title="Cumulative Possession Timeline",
+                color_discrete_map={"team_a_pct": "#4f46e5", "team_b_pct": "#ef4444"},
+            )
+            fig_line.update_layout(
+                height=300,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(t=40, b=20, l=20, r=20),
+            )
+            st.plotly_chart(fig_line, use_container_width=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # ── Download Annotated Video ──
+        job_id = r.get('job_id')
+        if job_id:
+            st.markdown('<div class="dashboard-card">', unsafe_allow_html=True)
+            st.markdown('<div class="card-title">🎬 Annotated Video</div>',
+                        unsafe_allow_html=True)
+            st.info(
+                "Click the button below to download the annotated match video. "
+                "Bounding boxes show: 🔴 Team A · 🔵 Team B · 🟡 Referee · 🟢 Ball. "
+                "A real-time possession bar is overlaid at the top of each frame."
+            )
+            try:
+                import requests as _req2
+                vid_resp = _req2.get(
+                    f"http://localhost:8000/possession/download/{job_id}",
+                    stream=True, timeout=120)
+                if vid_resp.status_code == 200:
+                    st.download_button(
+                        label="⬇️ Download Annotated Video",
+                        data=vid_resp.content,
+                        file_name=f"possession_{job_id}_annotated.mp4",
+                        mime="video/mp4",
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning("Annotated video not yet available.")
+            except Exception as exc:
+                st.warning(f"Could not fetch video: {exc}")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        if st.button("🗑️ Clear Results", key="clear_poss"):
+            del st.session_state["possession_result"]
+            st.rerun()
+
+    elif video_file is None:
+        st.markdown('<div class="dashboard-card">', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="text-align:center; padding: 3rem 2rem; color:#64748b;">
+            <div style="font-size:4rem; margin-bottom:1rem;">⚽</div>
+            <h3 style="color:#1e293b;">Upload a Match Video to Begin</h3>
+            <p>Supported formats: MP4, MKV, AVI, MOV</p>
+            <p style="font-size:0.85rem; margin-top:1rem; color:#94a3b8;">
+                The AI detects all on-pitch persons, filters out spectators, classifies<br>
+                players into Team A / Team B, identifies the referee, and tracks ball possession
+                frame-by-frame.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)

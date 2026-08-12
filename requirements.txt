@@ -20,3 +20,6 @@ python-multipart
 python-docx
 pdfplumber
 pytesseract==0.3.13
+ultralytics
+opencv-python-headless
+scipy

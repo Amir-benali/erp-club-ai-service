@@ -1,11 +1,15 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 import pandas as pd
 import joblib
 import shap
 import os
+import uuid
+import tempfile
+from pathlib import Path
 
 from app.medical_ocr import (
     extract_nutrients_from_text,
@@ -53,6 +57,14 @@ tags_metadata = [
             "using OCR + rule-based parsing for downstream model awareness."
         ),
     },
+    {
+        "name": "Possession Estimation",
+        "description": (
+            "**Module 5 — Football Possession Estimation (YOLO + MLP).** "
+            "Uploads a match video and returns Team A vs Team B possession percentages, "
+            "per-frame timeline, referee identification, spectator filtering, and an annotated output video."
+        ),
+    },
 ]
 
 app = FastAPI(
@@ -74,7 +86,7 @@ app = FastAPI(
         "No authentication is required for this internal microservice. "
         "Secure network-level access is enforced at the API gateway."
     ),
-    version="5.0.0",
+    version="5.1.0",
     openapi_tags=tags_metadata,
     contact={
         "name": "ERP Club — Data & AI Team",
@@ -965,3 +977,109 @@ async def extract_medical_nutrients(
         "mentions": extracted["mentions"],
         "flagged": extracted["flagged"],
     }
+
+
+# =============================================================
+# MODULE 5 — Possession Estimation
+# =============================================================
+try:
+    from app.possession import process_video_possession
+    POSSESSION_READY = True
+except Exception as _pe:
+    POSSESSION_READY = False
+    print(f"[WARN] Possession module unavailable: {_pe}")
+
+POSSESSION_OUTPUT_DIR = Path(tempfile.gettempdir()) / "erp_possession_outputs"
+POSSESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.post(
+    "/possession/analyze",
+    tags=["Possession Estimation"],
+    summary="Analyze a football match video for team possession",
+    response_description=(
+        "Possession percentages, per-frame timeline, referee/player counts, "
+        "classifier accuracy, and a download URL for the annotated output video."
+    ),
+)
+async def analyze_possession(
+    video: UploadFile = File(..., description="Match broadcast video (mp4, mkv, avi)"),
+    max_frames: int  = Form(default=300, ge=10, le=2000,
+                            description="Maximum number of frames to process"),
+    conf_thresh: float = Form(default=0.20, ge=0.05, le=0.80,
+                              description="YOLO person detection confidence threshold"),
+    ball_conf_thresh: float = Form(default=0.10, ge=0.05, le=0.80,
+                                   description="YOLO ball detection confidence threshold"),
+    poss_radius_px: float = Form(default=100.0, ge=20.0, le=500.0,
+                                  description="Pixel radius around ball to claim possession"),
+    smoothing_window: int = Form(default=5, ge=1, le=30,
+                                  description="Majority-vote smoothing window size (frames)"),
+):
+    """
+    Upload a match video to run the full possession estimation pipeline:
+
+    - **Spectators** in the stands are ignored (pitch boundary filter).
+    - **Referees** on the pitch are identified (Class 2) and excluded from possession.
+    - **Goalkeepers** are correctly assigned to Team A or Team B.
+    - **IoU tracking + EMA probability smoothing** prevents annotation flickering.
+    - Returns possession stats + download link for the annotated video.
+    """
+    if not POSSESSION_READY:
+        raise HTTPException(
+            status_code=503,
+            detail="Possession module is not available. Ensure ultralytics, opencv-python, and scikit-learn are installed.",
+        )
+
+    suffix = Path(video.filename).suffix.lower()
+    if suffix not in (".mp4", ".mkv", ".avi", ".mov"):
+        raise HTTPException(status_code=400,
+                            detail=f"Unsupported video format '{suffix}'. Use mp4, mkv, avi or mov.")
+
+    job_id = str(uuid.uuid4())[:8]
+    input_path  = POSSESSION_OUTPUT_DIR / f"{job_id}_input{suffix}"
+    output_path = POSSESSION_OUTPUT_DIR / f"{job_id}_annotated.mp4"
+
+    # Save uploaded file
+    contents = await video.read()
+    with open(input_path, "wb") as f:
+        f.write(contents)
+
+    try:
+        result = process_video_possession(
+            video_path=str(input_path),
+            output_video_path=str(output_path),
+            max_frames=max_frames,
+            conf_thresh=conf_thresh,
+            ball_conf_thresh=ball_conf_thresh,
+            poss_radius_px=poss_radius_px,
+            smoothing_window=smoothing_window,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Possession analysis failed: {str(e)}")
+    finally:
+        if input_path.exists():
+            input_path.unlink(missing_ok=True)
+
+    result["job_id"] = job_id
+    result["output_video_download_url"] = f"/possession/download/{job_id}"
+    # Keep only last 20 per-frame records in response for brevity (full data in video)
+    result["per_frame_records"] = result["per_frame_records"][-20:]
+    return result
+
+
+@app.get(
+    "/possession/download/{job_id}",
+    tags=["Possession Estimation"],
+    summary="Download the annotated possession video",
+    response_class=FileResponse,
+)
+async def download_possession_video(job_id: str):
+    """Stream the annotated video generated by `/possession/analyze`."""
+    video_path = POSSESSION_OUTPUT_DIR / f"{job_id}_annotated.mp4"
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video not found. It may have expired.")
+    return FileResponse(
+        path=str(video_path),
+        media_type="video/mp4",
+        filename=f"possession_{job_id}_annotated.mp4",
+    )
