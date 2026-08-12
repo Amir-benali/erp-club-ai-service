@@ -41,21 +41,29 @@ _yolo_model = None
 # YOLO Model Loader (lazy, singleton)
 # ─────────────────────────────────────────
 def get_yolo_model(weights_name: str = "yolo11m.pt") -> YOLO:
+    """
+    Load YOLO model. Ultralytics auto-resolves the weights path:
+    - Checks YOLO_CONFIG_DIR (set to /app/.yolo in Dockerfile)
+    - Falls back to ~/.config/Ultralytics/
+    - Downloads automatically if not found (dev/local only)
+    On Railway the weights are baked into the image at build time.
+    """
     global _yolo_model
     if _yolo_model is not None:
         return _yolo_model
 
-    # Search several candidate paths
-    this_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        weights_name,
-        os.path.join(this_dir, weights_name),
-        os.path.join(this_dir, "..", "odin DL", weights_name),
-        os.path.join(this_dir, "..", "..", "odin DL", weights_name),
-        os.path.join(this_dir, "..", "..", weights_name),
-    ]
-    chosen = next((p for p in candidates if os.path.exists(p)), weights_name)
-    _yolo_model = YOLO(chosen)
+    # Try nano as a lighter fallback if medium isn't cached
+    for w in [weights_name, "yolo11n.pt", "yolov8m.pt", "yolov8n.pt"]:
+        try:
+            _yolo_model = YOLO(w)
+            print(f"[Possession] Loaded YOLO weights: {w}")
+            break
+        except Exception:
+            continue
+
+    if _yolo_model is None:
+        raise RuntimeError("Could not load any YOLO weights. Check the Dockerfile RUN step.")
+
     return _yolo_model
 
 

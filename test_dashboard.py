@@ -1024,42 +1024,71 @@ elif page == "⚽ M5 - Possession Estimation":
 
     st.markdown('</div>', unsafe_allow_html=True)
 
+    API_BASE = os.environ.get("API_BASE_URL", "http://localhost:8000")
+
     if video_file is not None:
         st.markdown('<div class="dashboard-card">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">🚀 Run Analysis</div>', unsafe_allow_html=True)
 
         if st.button("⚽ Analyze Possession", use_container_width=True, type="primary"):
-            with st.spinner("🔄 Uploading and processing video — this may take several minutes..."):
-                try:
-                    import requests as _req
-                    files = {"video": (video_file.name, video_file.getvalue(),
-                                       f"video/{video_file.type.split('/')[-1]}")}
-                    data = {
-                        "max_frames":       str(max_frames),
-                        "conf_thresh":      str(conf_thresh),
-                        "ball_conf_thresh": str(ball_thresh),
-                        "poss_radius_px":   str(poss_radius),
-                        "smoothing_window": str(smooth_win),
-                    }
-                    resp = _req.post(
-                        "http://localhost:8000/possession/analyze",
-                        files=files,
-                        data=data,
-                        timeout=600,
-                    )
-
-                    if resp.status_code == 200:
-                        r = resp.json()
-                        st.session_state["possession_result"] = r
-                        st.success("✅ Analysis complete!")
-                    else:
-                        st.error(f"API error ({resp.status_code}): {resp.text}")
-                except Exception as exc:
-                    st.error(f"Could not reach FastAPI at localhost:8000. Details: {exc}")
+            import requests as _req
+            try:
+                files = {"video": (video_file.name, video_file.getvalue(),
+                                   f"video/{video_file.type.split('/')[-1]}")}
+                data  = {
+                    "max_frames":       str(max_frames),
+                    "conf_thresh":      str(conf_thresh),
+                    "ball_conf_thresh": str(ball_thresh),
+                    "poss_radius_px":   str(poss_radius),
+                    "smoothing_window": str(smooth_win),
+                }
+                submit = _req.post(f"{API_BASE}/possession/analyze",
+                                   files=files, data=data, timeout=60)
+                if submit.status_code == 202:
+                    job_data = submit.json()
+                    st.session_state["possession_job_id"] = job_data["job_id"]
+                    st.session_state.pop("possession_result", None)
+                    st.success(f"✅ Job queued — ID `{job_data['job_id']}`. Polling for results...")
+                    st.rerun()
+                else:
+                    st.error(f"Submission failed ({submit.status_code}): {submit.text}")
+            except Exception as exc:
+                st.error(f"Could not reach the API at {API_BASE}. Details: {exc}")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Results Panel ──
+    # ── Auto-poll when a job is in progress ──
+    if "possession_job_id" in st.session_state and "possession_result" not in st.session_state:
+        import requests as _req2, time as _time2
+        job_id     = st.session_state["possession_job_id"]
+        status_url = f"{API_BASE}/possession/status/{job_id}"
+        poll_ph    = st.empty()
+
+        with st.spinner("⏳ Processing on server — this may take a few minutes..."):
+            for attempt in range(300):   # ~15 min max at 3 s/poll
+                _time2.sleep(3)
+                try:
+                    sr     = _req2.get(status_url, timeout=15).json()
+                    status = sr.get("status", "unknown")
+                except Exception:
+                    poll_ph.warning(f"⚠️ Poll #{attempt+1} — connection error, retrying...")
+                    continue
+
+                poll_ph.info(f"🔄 Status: **{status}** (poll #{attempt+1})")
+
+                if status == "done":
+                    st.session_state["possession_result"] = sr
+                    del st.session_state["possession_job_id"]
+                    poll_ph.success("✅ Analysis complete!")
+                    st.rerun()
+                    break
+                elif status == "error":
+                    poll_ph.error(f"❌ Processing failed: {sr.get('error', 'Unknown error')}")
+                    del st.session_state["possession_job_id"]
+                    break
+            else:
+                poll_ph.warning("⚠️ Timed out polling for results. Refresh to check again.")
+
     if "possession_result" in st.session_state and st.session_state.possession_result:
         r = st.session_state.possession_result
 
