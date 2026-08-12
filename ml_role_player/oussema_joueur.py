@@ -173,6 +173,7 @@ page = st.sidebar.radio(
     [
         "🗺️ Heatmap Spatiale",
         "🎯 Prédiction de Succès (XGBoost)",
+        "📈 Évolution de performance",
         "⚖️ Afficher les deux (Original)"
     ]
 )
@@ -391,3 +392,79 @@ with col_side:
                     st.error("API injoignable.")
                 
         st.markdown('</div>', unsafe_allow_html=True)
+
+
+if page == "📈 Évolution de performance":
+    st.markdown("## 📈 Évolution de performance")
+    st.caption("Prévision de l'indice de forme mensuel avec le modèle de série temporelle StatsBomb.")
+
+    left, right = st.columns([2, 1], gap="large")
+    with left:
+        history_text = st.text_area(
+            "Historique des scores mensuels (du plus ancien au plus récent)",
+            value="82, 84, 86, 85, 88, 89",
+            help="Séparez les scores par des virgules, espaces ou retours à la ligne. Minimum : 3 scores.",
+        )
+    with right:
+        performance_player_id = st.number_input("ID joueur", min_value=1, value=10, step=1)
+        forecast_steps = st.slider("Mois à prévoir", min_value=1, max_value=6, value=3)
+        matches_played = st.slider("Matchs prévus / mois", min_value=0, max_value=12, value=3)
+
+    if st.button("Prédire l'évolution", type="primary", use_container_width=True):
+        try:
+            raw_values = history_text.replace(";", ",").replace("\n", ",").split(",")
+            history = [float(value.strip()) for value in raw_values if value.strip()]
+            if len(history) < 3:
+                raise ValueError("Ajoutez au moins trois scores mensuels.")
+            if any(value < 0 or value > 100 for value in history):
+                raise ValueError("Les scores doivent être compris entre 0 et 100.")
+        except ValueError as exc:
+            st.error(f"Historique invalide : {exc}")
+        else:
+            payload = {
+                "playerId": int(performance_player_id),
+                "history": history,
+                "steps": forecast_steps,
+                "matches_played": matches_played,
+            }
+            try:
+                response = requests.post(
+                    f"{API_BASE_URL}/predict-player-performance", json=payload, timeout=20
+                )
+                if response.status_code != 200:
+                    detail = response.json().get("detail", response.text)
+                    st.error(f"Erreur API : {detail}")
+                else:
+                    result = response.json()
+                    predictions = result["predictions"]
+                    last_score = history[-1]
+                    next_score = predictions[0]
+                    delta = next_score - last_score
+
+                    metric_a, metric_b, metric_c = st.columns(3)
+                    metric_a.metric("Dernier score", f"{last_score:.1f}/100")
+                    metric_b.metric("Prévision du prochain mois", f"{next_score:.1f}/100", f"{delta:+.1f} pts")
+                    metric_c.metric("Horizon", f"{len(predictions)} mois")
+
+                    history_x = [f"M-{len(history) - index - 1}" if index < len(history) - 1 else "Actuel"
+                                 for index in range(len(history))]
+                    forecast_x = ["Actuel"] + [f"M+{index}" for index in range(1, len(predictions) + 1)]
+                    figure = go.Figure()
+                    figure.add_trace(go.Scatter(
+                        x=history_x, y=history, mode="lines+markers", name="Historique",
+                        line=dict(color="#ff6b57", width=3), marker=dict(size=9),
+                    ))
+                    figure.add_trace(go.Scatter(
+                        x=forecast_x, y=[last_score] + predictions, mode="lines+markers", name="Prévision",
+                        line=dict(color="#38bdf8", width=3, dash="dash"), marker=dict(size=9),
+                    ))
+                    figure.update_layout(
+                        height=420, yaxis=dict(range=[60, 100], title="Score de performance"),
+                        xaxis_title="Période", plot_bgcolor="#0f172a", paper_bgcolor="#0f172a",
+                        font=dict(color="#f8fafc"), legend=dict(orientation="h", y=1.12),
+                        margin=dict(l=20, r=20, t=55, b=20),
+                    )
+                    st.plotly_chart(figure, use_container_width=True)
+                    st.caption(f"Source : {result['source']} · R² enregistré : {result['model_metrics'].get('r2', 'n/a')}")
+            except requests.RequestException as exc:
+                st.error(f"API Joueur injoignable : {exc}")

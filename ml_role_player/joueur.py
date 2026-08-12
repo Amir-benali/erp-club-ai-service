@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import os
 import random
+from typing import List
 
 app = FastAPI(
     title="ERP Club AI - Player Action Prediction",
@@ -17,6 +18,7 @@ app = FastAPI(
 # ---------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "player_heatmap_model.joblib")
+PERFORMANCE_MODEL_PATH = os.path.join(BASE_DIR, "models", "player_performance_model.joblib")
 
 model_artifact = None
 try:
@@ -27,6 +29,17 @@ try:
         print(f"[WARN] [MODULE JOUEUR] Modèle introuvable à {MODEL_PATH}. Le fallback mathématique sera utilisé.")
 except Exception as e:
     print(f"[WARN] [MODULE JOUEUR] Erreur au chargement du modèle : {e}. Le fallback mathématique sera utilisé.")
+
+# Chargement du modèle de série temporelle de performance.
+performance_model_artifact = None
+try:
+    if os.path.exists(PERFORMANCE_MODEL_PATH):
+        performance_model_artifact = joblib.load(PERFORMANCE_MODEL_PATH)
+        print("[OK] [MODULE JOUEUR] Modèle de performance temporelle chargé.")
+    else:
+        print(f"[WARN] [MODULE JOUEUR] Modèle temporel introuvable : {PERFORMANCE_MODEL_PATH}")
+except Exception as e:
+    print(f"[WARN] [MODULE JOUEUR] Erreur de chargement du modèle temporel : {e}")
 
 # ---------------------------------------------------------
 # SCHÉMAS DE DONNÉES (Pydantic)
@@ -39,13 +52,88 @@ class ActionSuccessInput(BaseModel):
     under_pressure: bool = False
     play_pattern: str = "Regular Play"
 
+
+class PerformanceForecastInput(BaseModel):
+    """Historique mensuel de scores de forme, du plus ancien au plus récent."""
+    playerId: int = 10
+    history: List[float] = Field(..., min_length=3)
+    steps: int = Field(3, ge=1, le=6)
+    matches_played: int = Field(3, ge=0, le=20)
+
 # ---------------------------------------------------------
 # ROUTES DE L'API
 # ---------------------------------------------------------
 
 @app.get("/")
 def read_root():
-    return {"message": "API Joueur est en ligne 🟢"}
+    return {
+        "message": "API Joueur est en ligne 🟢",
+        "performance_model_loaded": performance_model_artifact is not None,
+    }
+
+
+@app.get("/player-performance-model-info")
+def get_player_performance_model_info():
+    if performance_model_artifact is None:
+        raise HTTPException(status_code=503, detail="Le modèle de performance temporelle n'est pas disponible.")
+    artifact = performance_model_artifact
+    return {
+        "model_type": artifact.get("model_type"),
+        "task": artifact.get("task"),
+        "data_source": artifact.get("data_source"),
+        "min_months": artifact.get("min_months"),
+        "metrics": artifact.get("metrics", {}),
+    }
+
+
+@app.post("/predict-player-performance")
+def predict_player_performance(data: PerformanceForecastInput):
+    """Prévoit les prochains scores mensuels à partir de l'historique du joueur."""
+    if performance_model_artifact is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Modèle indisponible. Exécutez d'abord le notebook 05_player_performance_timeseries.ipynb.",
+        )
+
+    artifact = performance_model_artifact
+    lags = artifact.get("lags", [1, 2, 3])
+    if len(data.history) < max(lags):
+        raise HTTPException(status_code=422, detail=f"Au moins {max(lags)} scores historiques sont requis.")
+    if any(score < 0 or score > 100 for score in data.history):
+        raise HTTPException(status_code=422, detail="Chaque score de l'historique doit être compris entre 0 et 100.")
+
+    model = artifact["model"]
+    features = artifact["features"]
+    roll_window = int(artifact.get("roll_window", 3))
+    score_min, score_max = artifact.get("score_range", (0.0, 100.0))
+    scores = [float(score) for score in data.history]
+    predictions = []
+
+    for _ in range(data.steps):
+        row = {f"lag_{lag}": scores[-lag] for lag in lags}
+        recent = scores[-roll_window:]
+        row.update({
+            "roll_mean": float(np.mean(recent)),
+            "roll_std": float(np.std(recent)) if len(recent) > 1 else 0.0,
+            "expanding_mean": float(np.mean(scores)),
+            "delta_prev": float(scores[-1] - scores[-2]) if len(scores) > 1 else 0.0,
+            "month_index": len(scores),
+            "matches_played": data.matches_played,
+        })
+        prediction = float(model.predict(pd.DataFrame([row])[features])[0])
+        prediction = float(np.clip(prediction, score_min, score_max))
+        predictions.append(round(prediction, 2))
+        scores.append(prediction)
+
+    return {
+        "playerId": data.playerId,
+        "history": [round(value, 2) for value in data.history],
+        "predictions": predictions,
+        "steps": data.steps,
+        "score_range": [score_min, score_max],
+        "source": "player_performance_timeseries_model",
+        "model_metrics": artifact.get("metrics", {}),
+    }
 
 @app.post("/predict-action-success")
 def predict_action_success(data: ActionSuccessInput):
