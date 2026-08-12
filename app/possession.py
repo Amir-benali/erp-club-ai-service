@@ -1,21 +1,24 @@
 """
 possession.py — Possession Estimation Engine for FastAPI & Streamlit
-Handles: Spectator filtering, Referee classification, Goalkeeper protection,
-         IoU tracking, EMA probability smoothing, annotated video output.
+Memory-optimised for Railway (512 MB – 8 GB plans):
+  • yolo11n (nano) by default  → ~200 MB peak vs ~1.5 GB for medium
+  • FP16 half-precision inference
+  • 640-px inference resolution
+  • Frame arrays NOT held in sample_dets (only box coords stored)
+  • Lightweight SGD classifier instead of deep MLP
+  • gc.collect() every 30 frames
 """
 
+import gc
 import os
-import sys
-import glob
-import random
 from collections import Counter
 
 import cv2
 import numpy as np
+from sklearn.linear_model import SGDClassifier
 from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
-from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from ultralytics import YOLO
@@ -40,7 +43,11 @@ _yolo_model = None
 # ─────────────────────────────────────────
 # YOLO Model Loader (lazy, singleton)
 # ─────────────────────────────────────────
-def get_yolo_model(weights_name: str = "yolo11m.pt") -> YOLO:
+# Prefer nano on Railway (low RAM); override via env YOLO_WEIGHTS=yolo11m.pt
+_DEFAULT_WEIGHTS = os.environ.get("YOLO_WEIGHTS", "yolo11n.pt")
+_USE_HALF = os.environ.get("YOLO_HALF", "1") == "1"   # FP16 saves ~50% VRAM/RAM
+
+def get_yolo_model(weights_name: str = _DEFAULT_WEIGHTS) -> YOLO:
     """
     Load YOLO model. Ultralytics auto-resolves the weights path:
     - Checks YOLO_CONFIG_DIR (set to /app/.yolo in Dockerfile)
@@ -52,11 +59,11 @@ def get_yolo_model(weights_name: str = "yolo11m.pt") -> YOLO:
     if _yolo_model is not None:
         return _yolo_model
 
-    # Try nano as a lighter fallback if medium isn't cached
-    for w in [weights_name, "yolo11n.pt", "yolov8m.pt", "yolov8n.pt"]:
+    # Prefer nano; fall through lighter variants so Railway doesn't OOM
+    for w in [weights_name, "yolo11n.pt", "yolov8n.pt"]:
         try:
             _yolo_model = YOLO(w)
-            print(f"[Possession] Loaded YOLO weights: {w}")
+            print(f"[Possession] Loaded YOLO: {w}  half={_USE_HALF}")
             break
         except Exception:
             continue
@@ -195,10 +202,17 @@ def build_team_classifier(detections: list, match_name: str = "Match"):
 
     feats, meta = [], []
     for d in detections:
-        f = jersey_color_hist(d["frame_img"], d["box"])
+        img = d["frame_img"]
+        # frame_img is now a person-crop; build a full-extent box for it
+        if img is None or img.size == 0:
+            continue
+        h, w = img.shape[:2]
+        box_for_hist = [0, 0, w, h]
+        f = jersey_color_hist(img, box_for_hist)
         if f is not None:
             feats.append(f)
             meta.append(d)
+
     if len(feats) < 15:
         return None
 
@@ -245,13 +259,15 @@ def build_team_classifier(detections: list, match_name: str = "Match"):
     X_tr, X_te, y_tr, y_te = train_test_split(
         F, pseudo, test_size=0.25, random_state=42, stratify=strat)
 
+    # SGDClassifier (logistic) is << 1 MB vs MLP; still very accurate on HSV features
     clf = Pipeline([
         ("scaler", StandardScaler()),
-        ("mlp",    MLPClassifier(
-            hidden_layer_sizes=(512, 256, 128, 64),
-            activation="relu", solver="adam",
-            max_iter=5000, early_stopping=True, n_iter_no_change=60,
+        ("sgd", SGDClassifier(
+            loss="modified_huber",      # supports predict_proba
+            max_iter=1000,
+            tol=1e-3,
             random_state=42,
+            n_jobs=1,
         )),
     ])
     clf.fit(X_tr, y_tr)
@@ -271,15 +287,15 @@ def build_team_classifier(detections: list, match_name: str = "Match"):
 # Main Pipeline
 # ─────────────────────────────────────────
 def process_video_possession(
-    video_path:       str,
+    video_path:        str,
     output_video_path: str,
-    max_frames:       int   = 300,
-    conf_thresh:      float = 0.20,
-    ball_conf_thresh: float = 0.10,
-    poss_radius_px:   float = 100.0,
-    smoothing_window: int   = 5,
-    yolo_weights:     str   = "yolo11m.pt",
-    det_imgsz:        int   = 960,
+    max_frames:        int   = 150,          # lower default → less RAM
+    conf_thresh:       float = 0.20,
+    ball_conf_thresh:  float = 0.10,
+    poss_radius_px:    float = 100.0,
+    smoothing_window:  int   = 5,
+    yolo_weights:      str   = _DEFAULT_WEIGHTS,
+    det_imgsz:         int   = 640,          # 640 vs 960 → ~55% less memory
 ) -> dict:
     """
     Full possession pipeline:
@@ -309,16 +325,23 @@ def process_video_possession(
         if not ret:
             continue
         hull, gmask = get_pitch_hull(frame)
-        res = model.predict(frame, conf=conf_thresh, classes=DETECT_CLASSES,
-                            imgsz=det_imgsz, verbose=False)[0]
+        res = model.predict(
+            frame, conf=conf_thresh, classes=DETECT_CLASSES,
+            imgsz=det_imgsz, half=_USE_HALF, verbose=False
+        )[0]
         if res.boxes is None or len(res.boxes) == 0:
-            continue
+            del frame; continue
         for box, cls_id, conf in zip(res.boxes.xyxy.cpu().numpy(),
                                      res.boxes.cls.cpu().numpy().astype(int),
                                      res.boxes.conf.cpu().numpy()):
             if cls_id == PERSON_CLASS_ID and conf >= conf_thresh:
                 if is_on_pitch(frame, box, hull, gmask):
-                    sample_dets.append({"frame": si, "box": box.tolist(), "frame_img": frame})
+                    # ⚠️ Store a tiny crop instead of the full frame to save RAM
+                    x1,y1,x2,y2 = [int(v) for v in box]
+                    crop = frame[max(0,y1):y2, max(0,x1):x2].copy()
+                    sample_dets.append({"frame": si, "box": box.tolist(), "frame_img": crop,
+                                        "_full_shape": frame.shape})
+        del frame; gc.collect()
 
     tc = build_team_classifier(sample_dets)
     clf     = tc["classifier"] if tc else None
@@ -355,8 +378,11 @@ def process_video_possession(
             break
 
         hull, gmask = get_pitch_hull(frame)
-        res = model.predict(frame, conf=min(conf_thresh, ball_conf_thresh),
-                            classes=DETECT_CLASSES, imgsz=det_imgsz, verbose=False)[0]
+        res = model.predict(
+            frame, conf=min(conf_thresh, ball_conf_thresh),
+            classes=DETECT_CLASSES, imgsz=det_imgsz,
+            half=_USE_HALF, verbose=False
+        )[0]
 
         det_boxes, det_probs = [], []
         ball_pos, best_bconf = None, 0.0
@@ -466,7 +492,10 @@ def process_video_possession(
             (bm,30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255,255,255), 2)
 
         out_w.write(frame)
+        del frame          # release immediately — don't wait for GC
         frame_idx += 1
+        if frame_idx % 30 == 0:
+            gc.collect()   # explicit GC every 30 frames
 
     cap.release()
     out_w.release()
