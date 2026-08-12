@@ -21,3 +21,4 @@ ml_core/datasets/
 
 # Modèles lourds (Optionnel : si tes fichiers .pkl font plus de 50 Mo, il vaut mieux éviter de les pousser sur GitHub)
 # ml_core/artifacts/*.pkl
+logs/
