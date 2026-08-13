@@ -10,6 +10,8 @@ import os
 import uuid
 import tempfile
 from pathlib import Path
+import random
+import numpy as np
 
 from app.medical_ocr import (
     extract_nutrients_from_text,
@@ -63,6 +65,14 @@ tags_metadata = [
             "**Module 5 — Football Possession Estimation (YOLO + MLP).** "
             "Uploads a match video and returns Team A vs Team B possession percentages, "
             "per-frame timeline, referee identification, spectator filtering, and an annotated output video."
+        ),
+    },
+    {
+        "name": "Player Intelligence",
+        "description": (
+            "**Player action and performance module.** "
+            "Generates season heatmap events, predicts action success probability, "
+            "and forecasts monthly player performance."
         ),
     },
 ]
@@ -175,6 +185,36 @@ if not model_survival_artifact:
         "[WARN] [MODULE 3] Fichier 'relapse_survival_model.joblib' introuvable. "
         f"Chemins testes: {possible_survival_paths}"
     )
+
+# --- MODULE 4 : Intelligence Joueur (Heatmap / Action Success / Performance) ---
+PLAYER_ACTION_MODEL_PATH = os.path.join(BASE_DIR, "ml_role_player", "models", "player_heatmap_model.joblib")
+PLAYER_PERFORMANCE_MODEL_PATH = os.path.join(BASE_DIR, "ml_role_player", "models", "player_performance_model.joblib")
+
+player_action_model_artifact = None
+try:
+    if os.path.exists(PLAYER_ACTION_MODEL_PATH):
+        player_action_model_artifact = joblib.load(PLAYER_ACTION_MODEL_PATH)
+        print("[OK] [MODULE 4] Modele Heatmap joueur charge avec succes.")
+    else:
+        print(
+            "[WARN] [MODULE 4] Modele Heatmap joueur introuvable. "
+            f"Chemin teste: {PLAYER_ACTION_MODEL_PATH}. Fallback mathematique actif."
+        )
+except Exception as e:
+    print(f"[WARN] [MODULE 4] Erreur Heatmap joueur : {e}. Fallback mathematique actif.")
+
+player_performance_model_artifact = None
+try:
+    if os.path.exists(PLAYER_PERFORMANCE_MODEL_PATH):
+        player_performance_model_artifact = joblib.load(PLAYER_PERFORMANCE_MODEL_PATH)
+        print("[OK] [MODULE 4] Modele de performance joueur charge avec succes.")
+    else:
+        print(
+            "[WARN] [MODULE 4] Modele de performance joueur introuvable. "
+            f"Chemin teste: {PLAYER_PERFORMANCE_MODEL_PATH}"
+        )
+except Exception as e:
+    print(f"[WARN] [MODULE 4] Erreur performance joueur : {e}")
 
 
 # ---------------------------------------------------------
@@ -651,6 +691,86 @@ class MedicalNutrientExtractionResponse(BaseModel):
     flagged: List[MedicalNutrientMention] = Field(..., description="Only low/high out-of-range mentions")
 
 
+class ActionSuccessInput(BaseModel):
+    playerId: int = Field(10, description="Player identifier")
+    x: float = Field(..., ge=0, le=120, description="StatsBomb X coordinate, from 0 to 120")
+    y: float = Field(..., ge=0, le=80, description="StatsBomb Y coordinate, from 0 to 80")
+    action_type: str = Field("Pass", description="Action type: Pass, Shot, or Carry")
+    under_pressure: bool = Field(False, description="Whether the player is under opponent pressure")
+    play_pattern: str = Field("Regular Play", description="Game situation or play pattern")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "playerId": 10,
+                "x": 95.0,
+                "y": 65.0,
+                "action_type": "Pass",
+                "under_pressure": True,
+                "play_pattern": "Regular Play",
+            }
+        }
+    }
+
+
+class ActionSuccessResponse(BaseModel):
+    playerId: int
+    success_probability: float = Field(..., ge=0.0, le=1.0)
+    distance_to_goal: float
+    source: str = Field(..., description="ml_model when the artifact is available, otherwise fallback_formula")
+
+
+class HeatmapEvent(BaseModel):
+    id: int
+    x: float
+    y: float
+    action_type: str
+    success: int = Field(..., ge=0, le=1)
+
+
+class PlayerSeasonHeatmapResponse(BaseModel):
+    playerId: int
+    total_actions: int
+    events: List[HeatmapEvent]
+
+
+class PerformanceForecastInput(BaseModel):
+    """Monthly performance history, ordered from oldest to newest."""
+    playerId: int = Field(10, description="Player identifier")
+    history: List[float] = Field(..., min_length=3, description="Monthly performance scores, oldest to newest")
+    steps: int = Field(3, ge=1, le=6, description="Number of months to forecast")
+    matches_played: int = Field(3, ge=0, le=20, description="Expected matches played per forecast month")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "playerId": 10,
+                "history": [82, 84, 86, 85, 88, 89],
+                "steps": 3,
+                "matches_played": 3,
+            }
+        }
+    }
+
+
+class PerformanceForecastResponse(BaseModel):
+    playerId: int
+    history: List[float]
+    predictions: List[float]
+    steps: int
+    score_range: List[float]
+    source: str
+    model_metrics: Dict[str, Any]
+
+
+class PlayerPerformanceModelInfoResponse(BaseModel):
+    model_type: Optional[str] = None
+    task: Optional[str] = None
+    data_source: Optional[str] = None
+    min_months: Optional[int] = None
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------
 # 5. ROUTES DE L'API
 # ---------------------------------------------------------
@@ -669,8 +789,217 @@ def read_root():
     return {
         "message": "ERP Club AI Service est en ligne 🟢",
         "version": "5.0.0",
-        "viiv_integration": "Viiv GX17 natif — champs `viiv` dans chaque requête POST"
+        "viiv_integration": "Viiv GX17 natif — champs `viiv` dans chaque requête POST",
+        "player_action_model_loaded": player_action_model_artifact is not None,
+        "player_performance_model_loaded": player_performance_model_artifact is not None,
     }
+
+
+@app.get(
+    "/player-performance-model-info",
+    tags=["Player Intelligence"],
+    summary="Get player performance model metadata",
+    response_model=PlayerPerformanceModelInfoResponse,
+    response_description="Model type, task, data source, minimum history length, and metrics",
+    responses={503: {"description": "Player performance model is not available"}},
+)
+def get_player_performance_model_info():
+    if player_performance_model_artifact is None:
+        raise HTTPException(status_code=503, detail="Le modele de performance temporelle n'est pas disponible.")
+
+    artifact = player_performance_model_artifact
+    return {
+        "model_type": artifact.get("model_type"),
+        "task": artifact.get("task"),
+        "data_source": artifact.get("data_source"),
+        "min_months": artifact.get("min_months"),
+        "metrics": artifact.get("metrics", {}),
+    }
+
+
+@app.post(
+    "/predict-player-performance",
+    tags=["Player Intelligence"],
+    summary="Forecast monthly player performance",
+    response_model=PerformanceForecastResponse,
+    response_description="Predicted performance scores for the requested forecast horizon",
+    responses={
+        200: {"description": "Forecast successful"},
+        422: {"description": "Invalid score history"},
+        503: {"description": "Player performance model is not available"},
+    },
+)
+def predict_player_performance(data: PerformanceForecastInput):
+    """
+    Forecasts the next monthly performance scores from a recent player score history.
+
+    The endpoint uses `player_performance_model.joblib` when available and returns
+    the recorded model metrics with the predictions for traceability.
+    """
+    if player_performance_model_artifact is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Modele indisponible. Executez d'abord le notebook 05_player_performance_timeseries.ipynb.",
+        )
+
+    artifact = player_performance_model_artifact
+    lags = artifact.get("lags", [1, 2, 3])
+    if len(data.history) < max(lags):
+        raise HTTPException(status_code=422, detail=f"Au moins {max(lags)} scores historiques sont requis.")
+    if any(score < 0 or score > 100 for score in data.history):
+        raise HTTPException(status_code=422, detail="Chaque score de l'historique doit etre compris entre 0 et 100.")
+
+    model = artifact["model"]
+    features = artifact["features"]
+    roll_window = int(artifact.get("roll_window", 3))
+    score_min, score_max = artifact.get("score_range", (0.0, 100.0))
+    scores = [float(score) for score in data.history]
+    predictions = []
+
+    for _ in range(data.steps):
+        row = {f"lag_{lag}": scores[-lag] for lag in lags}
+        recent = scores[-roll_window:]
+        row.update({
+            "roll_mean": float(np.mean(recent)),
+            "roll_std": float(np.std(recent)) if len(recent) > 1 else 0.0,
+            "expanding_mean": float(np.mean(scores)),
+            "delta_prev": float(scores[-1] - scores[-2]) if len(scores) > 1 else 0.0,
+            "month_index": len(scores),
+            "matches_played": data.matches_played,
+        })
+        prediction = float(model.predict(pd.DataFrame([row])[features])[0])
+        prediction = float(np.clip(prediction, score_min, score_max))
+        predictions.append(round(prediction, 2))
+        scores.append(prediction)
+
+    return {
+        "playerId": data.playerId,
+        "history": [round(value, 2) for value in data.history],
+        "predictions": predictions,
+        "steps": data.steps,
+        "score_range": [score_min, score_max],
+        "source": "player_performance_timeseries_model",
+        "model_metrics": artifact.get("metrics", {}),
+    }
+
+
+@app.post(
+    "/predict-action-success",
+    tags=["Player Intelligence"],
+    summary="Predict action success probability",
+    response_model=ActionSuccessResponse,
+    response_description="Probability of action success plus distance to goal",
+)
+def predict_action_success(data: ActionSuccessInput):
+    """
+    Predicts whether a pass, shot, or carry is likely to succeed from a given pitch location.
+
+    If `player_heatmap_model.joblib` is unavailable, the service keeps the endpoint online
+    with the same fallback formula previously used by the standalone player API.
+    """
+    goal_x, goal_y = 120.0, 40.0
+    distance = np.sqrt((goal_x - data.x) ** 2 + (goal_y - data.y) ** 2)
+    angle = np.arctan2(goal_y - data.y, goal_x - data.x) * (180 / np.pi)
+
+    if player_action_model_artifact:
+        try:
+            player_model = player_action_model_artifact["model"]
+            player_scaler = player_action_model_artifact["scaler"]
+            encoders = player_action_model_artifact["label_encoders"]
+            features = player_action_model_artifact["features"]
+
+            input_data = {
+                "x": data.x,
+                "y": data.y,
+                "Distance": distance,
+                "Angle": angle,
+                "action_type": data.action_type,
+                "play_pattern": data.play_pattern,
+                "under_pressure": int(data.under_pressure),
+            }
+
+            for col in ["action_type", "play_pattern"]:
+                if col in encoders:
+                    label_encoder = encoders[col]
+                    input_data[col] = (
+                        label_encoder.transform([input_data[col]])[0]
+                        if input_data[col] in label_encoder.classes_
+                        else 0
+                    )
+
+            df_input = pd.DataFrame([input_data])[features]
+            continuous_cols = ["x", "y", "Distance", "Angle"]
+            df_input[continuous_cols] = player_scaler.transform(df_input[continuous_cols])
+            prob_success = float(player_model.predict_proba(df_input)[0][1])
+
+            return {
+                "playerId": data.playerId,
+                "success_probability": round(prob_success, 4),
+                "distance_to_goal": round(distance, 2),
+                "source": "ml_model",
+            }
+        except Exception as e:
+            print(f"[WARN] [MODULE 4] Erreur prediction joueur ({e}), fallback actif.")
+
+    noise = random.uniform(-0.05, 0.05)
+    pressure_penalty = 0.25 if data.under_pressure else 0.0
+    action_penalty = 0.0
+    if data.action_type == "Shot":
+        action_penalty = 0.2
+    elif data.action_type == "Carry":
+        action_penalty = -0.1
+
+    p_success = 1.0 - (0.004 * distance) - pressure_penalty - action_penalty + noise
+    p_success = max(0.05, min(0.98, p_success))
+
+    return {
+        "playerId": data.playerId,
+        "success_probability": round(p_success, 4),
+        "distance_to_goal": round(distance, 2),
+        "source": "fallback_formula",
+    }
+
+
+@app.get(
+    "/player-season-heatmap",
+    tags=["Player Intelligence"],
+    summary="Generate player season heatmap events",
+    response_model=PlayerSeasonHeatmapResponse,
+    response_description="Synthetic geolocated player events used by the heatmap dashboard",
+)
+def get_player_season_heatmap(playerId: int = 10):
+    """
+    Returns 128 realistic geolocated player events biased toward the right half-space
+    and attacking box area, using StatsBomb pitch coordinates.
+    """
+    events = []
+
+    for i in range(128):
+        if random.random() < 0.75:
+            x = np.random.normal(100, 10)
+            y = np.random.normal(65, 8)
+        else:
+            x = np.random.uniform(20, 120)
+            y = np.random.uniform(0, 80)
+
+        x = max(0, min(120, x))
+        y = max(0, min(80, y))
+        action = random.choices(["Pass", "Shot", "Carry"], weights=[0.6, 0.1, 0.3])[0]
+
+        events.append({
+            "id": i,
+            "x": round(x, 2),
+            "y": round(y, 2),
+            "action_type": action,
+            "success": 1 if random.random() > 0.3 else 0,
+        })
+
+    return {
+        "playerId": playerId,
+        "total_actions": len(events),
+        "events": events,
+    }
+
 
 @app.post(
     "/predict-injury",

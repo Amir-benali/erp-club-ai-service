@@ -162,7 +162,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # API URL
-API_BASE_URL = "http://127.0.0.1:8001"
+API_BASE_URL = "http://127.0.0.1:8000"
 
 # Sidebar Navigation
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/8112/8112465.png", width=60)
