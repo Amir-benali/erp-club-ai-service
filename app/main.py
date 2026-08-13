@@ -18,6 +18,7 @@ from app.medical_ocr import (
     extract_text_from_file,
     run_easyocr_on_image_bytes,
 )
+from app.player_router import router as player_router
 
 # ---------------------------------------------------------
 # OpenAPI / Swagger Metadata
@@ -122,6 +123,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Player Performance & Heatmap module (ml_role_player models).
+app.include_router(player_router)
 
 # ---------------------------------------------------------
 # 1. CHARGEMENT ROBUSTE DES MODÈLES (Au démarrage)
