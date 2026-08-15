@@ -18,7 +18,6 @@ from app.medical_ocr import (
     extract_text_from_file,
     run_easyocr_on_image_bytes,
 )
-from app.player_router import router as player_router
 
 # ---------------------------------------------------------
 # OpenAPI / Swagger Metadata
@@ -123,9 +122,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Player Performance & Heatmap module (ml_role_player models).
-app.include_router(player_router)
 
 # ---------------------------------------------------------
 # 1. CHARGEMENT ROBUSTE DES MODÈLES (Au démarrage)
@@ -975,27 +971,36 @@ def get_player_season_heatmap(playerId: int = 10):
     """
     Returns 128 realistic geolocated player events biased toward the right half-space
     and attacking box area, using StatsBomb pitch coordinates.
+
+    The distribution is seeded from `playerId`, so a given player always gets the same
+    heatmap (stable across reloads) while different players get different ones. Local
+    generator instances are used rather than `random.seed()` / `np.random.seed()` so
+    that seeding stays scoped to this endpoint and never perturbs the global RNG that
+    other endpoints (e.g. the /predict-action-success fallback) draw from.
     """
+    rng = random.Random(playerId)
+    nprng = np.random.default_rng(playerId)
+
     events = []
 
     for i in range(128):
-        if random.random() < 0.75:
-            x = np.random.normal(100, 10)
-            y = np.random.normal(65, 8)
+        if rng.random() < 0.75:
+            x = nprng.normal(100, 10)
+            y = nprng.normal(65, 8)
         else:
-            x = np.random.uniform(20, 120)
-            y = np.random.uniform(0, 80)
+            x = nprng.uniform(20, 120)
+            y = nprng.uniform(0, 80)
 
         x = max(0, min(120, x))
         y = max(0, min(80, y))
-        action = random.choices(["Pass", "Shot", "Carry"], weights=[0.6, 0.1, 0.3])[0]
+        action = rng.choices(["Pass", "Shot", "Carry"], weights=[0.6, 0.1, 0.3])[0]
 
         events.append({
             "id": i,
             "x": round(x, 2),
             "y": round(y, 2),
             "action_type": action,
-            "success": 1 if random.random() > 0.3 else 0,
+            "success": 1 if rng.random() > 0.3 else 0,
         })
 
     return {
